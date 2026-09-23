@@ -172,13 +172,17 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 
 func runGet(args []string, stdout io.Writer) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return fmt.Errorf("get requires a resource: defaults, context, service-apps, or apps")
+		return fmt.Errorf("get requires a resource: defaults, domains, services, service-apps, or apps")
 	}
 	resource := strings.ToLower(strings.TrimSpace(args[0]))
 	commandArgs := args[1:]
 	switch resource {
 	case "defaults", "default", "context", "contexts":
 		return runDefaults(commandArgs, stdout)
+	case "domain", "domains":
+		return runDomains(commandArgs, stdout, false)
+	case "service", "services", "token-service", "token-services":
+		return runServices(commandArgs, stdout)
 	case "app", "apps", "service-app", "service-apps", "resource-app", "resource-apps", "identity-app", "identity-apps":
 		return runDiscover(commandArgs, stdout)
 	default:
@@ -188,16 +192,145 @@ func runGet(args []string, stdout io.Writer) error {
 
 func runDescribe(args []string, stdout io.Writer) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return fmt.Errorf("describe requires a resource: service-app or app")
+		return fmt.Errorf("describe requires a resource: domain, service-app, or app")
 	}
 	resource := strings.ToLower(strings.TrimSpace(args[0]))
 	commandArgs := args[1:]
 	switch resource {
+	case "domain", "domains":
+		return runDomains(commandArgs, stdout, true)
 	case "app", "apps", "service-app", "service-apps", "resource-app", "resource-apps", "identity-app", "identity-apps":
 		return runDiscover(commandArgs, stdout)
 	default:
 		return fmt.Errorf("unsupported describe resource %q", args[0])
 	}
+}
+
+type domainPlan struct {
+	SchemaVersion   string `json:"schemaVersion"`
+	Action          string `json:"action"`
+	ContextName     string `json:"contextName,omitempty"`
+	TenancyOCID     string `json:"tenancyOcid,omitempty"`
+	CompartmentOCID string `json:"compartmentOcid,omitempty"`
+	DomainID        string `json:"domainId,omitempty"`
+	Command         string `json:"command"`
+}
+
+func runDomains(args []string, stdout io.Writer, requireDomainID bool) error {
+	flags := flag.NewFlagSet("domains", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	domainID := flags.String("domain-id", "", "OCI Identity Domain OCID for describe")
+	compartmentID := flags.String("compartment-id", "", "OCI compartment OCID for list; defaults from current oci-context")
+	profile := flags.String("profile", "", "OCI CLI profile for generated commands; defaults from current oci-context or OCI_CLI_PROFILE")
+	ociConfigPath := flags.String("oci-config-file", "", "OCI CLI config file for generated commands; defaults from current oci-context or OCI_CLI_CONFIG_FILE")
+	region := flags.String("region", "", "OCI region for generated commands; defaults from current oci-context or OCI_CLI_REGION")
+	useOCIContext := flags.Bool("oci-context", true, "read current oci-context defaults for omitted values")
+	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for defaults")
+	var output string
+	addOutputFlags(flags, &output, "json", "output format: json or text")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	defaults := ociContextDefaults{}
+	if *useOCIContext {
+		defaults = loadOCIContextDefaults(*ociContextBin, "")
+		*profile = firstNonEmpty(*profile, defaults.Profile)
+		*ociConfigPath = firstNonEmpty(*ociConfigPath, defaults.OCIConfigPath)
+		*region = firstNonEmpty(*region, defaults.Region)
+		*compartmentID = firstNonEmpty(*compartmentID, defaults.CompartmentOCID, defaults.TenancyOCID)
+	}
+	if requireDomainID && strings.TrimSpace(*domainID) == "" {
+		return fmt.Errorf("--domain-id is required when describing a domain")
+	}
+
+	parts := []string{"oci", "iam", "domain"}
+	action := "list"
+	if strings.TrimSpace(*domainID) != "" {
+		action = "get"
+		parts = append(parts, action, "--domain-id", shellQuote(*domainID))
+	} else {
+		if strings.TrimSpace(*compartmentID) == "" {
+			return fmt.Errorf("--compartment-id is required when no current oci-context compartment or tenancy is available")
+		}
+		parts = append(parts, action, "--compartment-id", shellQuote(*compartmentID))
+	}
+	if strings.TrimSpace(*profile) != "" {
+		parts = append(parts, "--profile", shellQuote(*profile))
+	}
+	if strings.TrimSpace(*ociConfigPath) != "" {
+		parts = append(parts, "--config-file", shellQuote(*ociConfigPath))
+	}
+	if strings.TrimSpace(*region) != "" {
+		parts = append(parts, "--region", shellQuote(*region))
+	}
+	plan := domainPlan{
+		SchemaVersion: "oci-idm.domains.v1", Action: action, ContextName: defaults.ContextName,
+		TenancyOCID: defaults.TenancyOCID, CompartmentOCID: *compartmentID,
+		DomainID: *domainID, Command: strings.Join(parts, " "),
+	}
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "json":
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(plan)
+	case "text":
+		fmt.Fprintf(stdout, "action: %s\n", plan.Action)
+		if plan.ContextName != "" {
+			fmt.Fprintf(stdout, "context: %s\n", plan.ContextName)
+		}
+		if plan.CompartmentOCID != "" {
+			fmt.Fprintf(stdout, "compartment: %s\n", plan.CompartmentOCID)
+		}
+		if plan.DomainID != "" {
+			fmt.Fprintf(stdout, "domainId: %s\n", plan.DomainID)
+		}
+		fmt.Fprintf(stdout, "command: %s\n", plan.Command)
+		return nil
+	default:
+		return fmt.Errorf("unsupported output %q", output)
+	}
+}
+
+func runServices(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("services", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used to list token services")
+	var output string
+	addOutputFlags(flags, &output, "json", "output format: json or text")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	data, err := runCommand(*ociContextBin, "auth", "service", "list", "-o", "json")
+	if err != nil {
+		return fmt.Errorf("list oci-context token services: %w", err)
+	}
+	var services []ociContextTokenService
+	if err := json.Unmarshal(data, &services); err != nil {
+		return fmt.Errorf("decode oci-context token services: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "json":
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(services)
+	case "text":
+		for _, service := range services {
+			fmt.Fprintf(stdout, "%s\n  issuer: %s\n  scope: %s\n", service.Name, service.Issuer, service.Scope)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported output %q", output)
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func stripResourceArg(args []string, allowed ...string) ([]string, error) {
@@ -1208,6 +1341,9 @@ func writeRootHelp(stdout io.Writer, program string) {
 
 Usage:
   %s get defaults [options]
+  %s get domains [options]
+  %s describe domain --domain-id domain-ocid
+  %s get services [options]
   %s get service-apps [options]
   %s describe service-app [options]
   %s clone app --flow authorization-code --name hebe-obp-user
@@ -1251,7 +1387,7 @@ Pipe contracts:
   plan apps -o oci-context-yaml can pipe into oci-context service add --set-current
   plan apps -o ochain-env emits OCHAIN_TOKEN_COMMAND
   handoff remains available for saved plan files
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {

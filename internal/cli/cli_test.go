@@ -233,6 +233,54 @@ func TestGetServiceAppsText(t *testing.T) {
 	}
 }
 
+func TestGetDomainsUsesOCIContextAndEnvironmentDefaults(t *testing.T) {
+	t.Setenv("OCI_CLI_PROFILE", "ENV_PROFILE")
+	t.Setenv("OCI_CLI_REGION", "us-ashburn-1")
+	restore := mockOCIContext(t, map[string]string{
+		"export -f json": `{"name":"example-context","profile":"CONTEXT_PROFILE","region":"us-phoenix-1","tenancy_ocid":"ocid1.tenancy.oc1..example","compartment_ocid":"ocid1.compartment.oc1..example"}`,
+		"paths -o json":  `{"oci_config_path":"/tmp/oci-config"}`,
+	})
+	defer restore()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"get", "domains", "-o", "text"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run failed with %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"action: list", "context: example-context", "--compartment-id 'ocid1.compartment.oc1..example'", "--profile 'ENV_PROFILE'", "--region 'us-ashburn-1'"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in output:\n%s", want, out)
+		}
+	}
+}
+
+func TestDescribeDomainRequiresID(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"describe", "domain"}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "--domain-id is required") {
+		t.Fatalf("expected missing domain id error, got %q", stderr.String())
+	}
+}
+
+func TestGetServicesReadsOCIContext(t *testing.T) {
+	restore := mockOCIContext(t, map[string]string{
+		"auth service list -o json": `[{"name":"example-service","issuer":"https://example.identity.oraclecloud.com","scope":"https://service.example.com"}]`,
+	})
+	defer restore()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"get", "services", "-o", "text"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run failed with %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "example-service") || !strings.Contains(stdout.String(), "https://example.identity.oraclecloud.com") {
+		t.Fatalf("unexpected services output: %s", stdout.String())
+	}
+}
+
 func TestPatchAppOfflineAccessPlansAndExecutesGuardedSCIMPatch(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

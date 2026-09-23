@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -21,19 +22,23 @@ var runCommand commandRunner = func(name string, args ...string) ([]byte, error)
 }
 
 type ociContextDefaults struct {
-	ContextName   string
-	Profile       string
-	Region        string
-	OCIConfigPath string
-	ServiceName   string
-	Issuer        string
-	Scope         string
+	ContextName     string
+	Profile         string
+	Region          string
+	OCIConfigPath   string
+	TenancyOCID     string
+	CompartmentOCID string
+	ServiceName     string
+	Issuer          string
+	Scope           string
 }
 
 type ociContextExport struct {
 	Name                string `json:"name"`
 	Profile             string `json:"profile"`
 	Region              string `json:"region"`
+	TenancyOCID         string `json:"tenancy_ocid"`
+	CompartmentOCID     string `json:"compartment_ocid"`
 	CurrentService      string `json:"current_service"`
 	CamelCurrentService string `json:"currentService"`
 }
@@ -60,6 +65,8 @@ func loadOCIContextDefaults(bin string, serviceName string) ociContextDefaults {
 			defaults.ContextName = strings.TrimSpace(current.Name)
 			defaults.Profile = strings.TrimSpace(current.Profile)
 			defaults.Region = strings.TrimSpace(current.Region)
+			defaults.TenancyOCID = strings.TrimSpace(current.TenancyOCID)
+			defaults.CompartmentOCID = strings.TrimSpace(current.CompartmentOCID)
 			defaults.ServiceName = firstNonEmpty(current.CurrentService, current.CamelCurrentService)
 		}
 	}
@@ -88,6 +95,13 @@ func loadOCIContextDefaults(bin string, serviceName string) ociContextDefaults {
 			}
 		}
 	}
+	// OCI CLI-style environment settings are deliberate one-shell overrides of
+	// the selected context. Explicit command flags still win in each caller.
+	defaults.Profile = firstNonEmpty(os.Getenv("OCI_CLI_PROFILE"), defaults.Profile)
+	defaults.OCIConfigPath = firstNonEmpty(os.Getenv("OCI_CLI_CONFIG_FILE"), defaults.OCIConfigPath)
+	defaults.Region = firstNonEmpty(os.Getenv("OCI_CLI_REGION"), os.Getenv("OCI_REGION"), defaults.Region)
+	defaults.TenancyOCID = firstNonEmpty(os.Getenv("OCI_TENANCY_OCID"), defaults.TenancyOCID)
+	defaults.CompartmentOCID = firstNonEmpty(os.Getenv("OCI_COMPARTMENT_OCID"), defaults.CompartmentOCID)
 	return defaults
 }
 
