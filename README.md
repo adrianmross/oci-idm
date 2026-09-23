@@ -73,7 +73,7 @@ Commands that read a plan accept `-f` or `--file`; `--plan` remains available
 as a compatibility alias.
 The preferred command shape is `oci-idm <verb> <resource> [flags]`, similar to
 `kubectl`: `get defaults`, `get domains`, `get services`, `get service-apps`, `clone app`, `plan apps`,
-`doctor plan`, `materialize plan`, `apply plan`, and `validate plan`.
+`doctor plan`, `materialize plan`, `apply plan`, `validate plan`, and `export`.
 
 Inspect the resolved defaults before planning:
 
@@ -110,6 +110,26 @@ The plan defaults the compartment and home region from the selected
 `oci-idm get services` lists the metadata-only token services owned by the
 current `oci-context`. Creating, selecting, and authenticating a token service
 remain `oci-context` responsibilities.
+
+## Control Plane OIDC export
+
+Render a reviewed, secret-free OBPEE Control Plane OIDC payload from an issuer,
+OAuth client ID, and reusable policy. The command reads standard OIDC discovery;
+it does not call the Control Plane or Kubernetes.
+
+```bash
+oci-idm export \
+  --shape obpee-cp \
+  --domain https://example.identity.oraclecloud.com \
+  --app example-control-plane-client-id \
+  --control-plane-url https://controlplane.example.com:7443 \
+  --policy examples/obpee-cp-policy.json \
+  > obpee-cp-oidc.json
+```
+
+The output contains a `secretRefs.providerClientSecret` reference, never a
+client-secret value. `request` is the Control Plane API-shaped portion; a future
+supported API apply path must resolve the reference only in memory.
 
 For OBP after selecting your OCI context and importing an `oci-context` token
 service, the shortest planning command is:

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +56,61 @@ func TestPlanJSON(t *testing.T) {
 	apps := payload["apps"].([]any)
 	if len(apps) != 2 {
 		t.Fatalf("expected 2 apps, got %d", len(apps))
+	}
+}
+
+func TestExportOBPEECP(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/.well-known/openid-configuration" {
+			http.NotFound(w, request)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"issuer":"` + server.URL + `","jwks_uri":"` + server.URL + `/keys","authorization_endpoint":"` + server.URL + `/authorize","token_endpoint":"` + server.URL + `/token","end_session_endpoint":"` + server.URL + `/logout"}`))
+	}))
+	defer server.Close()
+	previousClient := oidcHTTPClient
+	oidcHTTPClient = server.Client()
+	defer func() { oidcHTTPClient = previousClient }()
+
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	policy := `{
+  "provider":{"providerName":"IDCS_AUTOMATION","providerType":"IDCS","scope":"openid profile offline_access","clientClaimName":"client_name","clientClaimValue":"cp-client","groupsClaimName":"group_roles","userClaimName":"user_displayname"},
+  "groupMappings":{"bpmAdminGroup":"bpm","walletSuperAdminGroup":"wallet-super","instanceAdminGroup":"instance-admin","instanceOperatorGroup":"instance-operator","instanceApiClientGroup":"instance-client","walletOrgAdminGroup":"wallet-org-admin","walletOrgUserGroup":"wallet-org-user","daSuperAdminGroup":"da-super","daTokenAdminGroup":"da-token","daDeployerGroup":"da-deployer","daApproverGroup":"da-approver"},
+  "secretRefs":{"providerClientSecret":"secret://obp/idcs/control-plane-client-secret"}
+}`
+	if err := os.WriteFile(policyPath, []byte(policy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"export", "--shape", "obpee-cp", "--domain", server.URL, "--app", "cp-client-id", "--control-plane-url", "https://cp.example.test:7443", "--policy", policyPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("export failed with %d: %s", code, stderr.String())
+	}
+	var output struct {
+		SchemaVersion string `json:"schemaVersion"`
+		Target        struct {
+			RedirectURI string `json:"redirectUri"`
+		} `json:"target"`
+		IdentityDomain struct {
+			Issuer        string `json:"issuer"`
+			ApplicationID string `json:"applicationId"`
+		} `json:"identityDomain"`
+		Request map[string]string `json:"request"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("invalid export JSON: %v\n%s", err, stdout.String())
+	}
+	if output.SchemaVersion != "oci-idm.obpee-cp.v1" || output.IdentityDomain.Issuer != server.URL || output.IdentityDomain.ApplicationID != "cp-client-id" {
+		t.Fatalf("unexpected export: %+v", output)
+	}
+	if output.Target.RedirectURI != "https://cp.example.test:7443/api/v1/auth/provider/code" || output.Request["providerClientId"] != "cp-client-id" {
+		t.Fatalf("missing rendered Control Plane fields: %+v", output)
+	}
+	if _, found := output.Request["providerClientSecret"]; found || strings.Contains(stdout.String(), `"providerClientSecret":"`) {
+		t.Fatalf("export included a client secret value: %s", stdout.String())
 	}
 }
 

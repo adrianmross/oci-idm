@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,15 +17,17 @@ import (
 	"github.com/adrianmross/oci-idm/internal/doctor"
 	"github.com/adrianmross/oci-idm/internal/handoff"
 	"github.com/adrianmross/oci-idm/internal/materialize"
+	"github.com/adrianmross/oci-idm/internal/obpeecp"
 	"github.com/adrianmross/oci-idm/internal/planner"
 	"github.com/adrianmross/oci-idm/internal/validation"
 )
 
 var (
-	version     = "dev"
-	commit      = "none"
-	date        = "unknown"
-	stdinReader = io.Reader(os.Stdin)
+	version        = "dev"
+	commit         = "none"
+	date           = "unknown"
+	stdinReader    = io.Reader(os.Stdin)
+	oidcHTTPClient = http.DefaultClient
 )
 
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -73,6 +76,12 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 			return 1
 		}
 		if err := runPlan(commandArgs, stdout); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	case "export":
+		if err := runExport(args[1:], stdout); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -900,6 +909,91 @@ func runPlan(args []string, stdout io.Writer) error {
 	}
 
 	return printPlanOutput(stdout, plan, output, *tokenService)
+}
+
+func runExport(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("export", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	domain := flags.String("domain", "", "Identity Domains issuer URL")
+	app := flags.String("app", "", "Identity Domains OAuth client ID")
+	controlPlaneURL := flags.String("control-plane-url", "", "Control Plane base URL")
+	redirectURI := flags.String("redirect-uri", "", "Control Plane OAuth callback URL; defaults from --control-plane-url")
+	policyPath := flags.String("policy", "", "path to secret-free OBPEE Control Plane policy JSON")
+	shape := flags.String("shape", "", "render target: obpee-cp")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.ToLower(strings.TrimSpace(*shape)) != "obpee-cp" {
+		return fmt.Errorf("--shape obpee-cp is required")
+	}
+	if strings.TrimSpace(*domain) == "" || strings.TrimSpace(*app) == "" || strings.TrimSpace(*controlPlaneURL) == "" || strings.TrimSpace(*policyPath) == "" {
+		return fmt.Errorf("--domain, --app, --control-plane-url, and --policy are required")
+	}
+	if strings.TrimSpace(*redirectURI) == "" {
+		*redirectURI = strings.TrimRight(strings.TrimSpace(*controlPlaneURL), "/") + "/api/v1/auth/provider/code"
+	}
+	policy, err := readOBPEEPolicy(*policyPath)
+	if err != nil {
+		return err
+	}
+	wellKnownURI, err := obpeecp.WellKnownURI(*domain)
+	if err != nil {
+		return err
+	}
+	discovery, err := fetchOIDCDiscovery(wellKnownURI)
+	if err != nil {
+		return err
+	}
+	document, err := obpeecp.Build(obpeecp.Input{
+		Domain: *domain, App: *app, ControlPlaneURL: *controlPlaneURL, RedirectURI: *redirectURI,
+		Policy: policy, Discovery: discovery,
+	})
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(document)
+}
+
+func readOBPEEPolicy(path string) (obpeecp.Policy, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return obpeecp.Policy{}, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var policy obpeecp.Policy
+	if err := decoder.Decode(&policy); err != nil {
+		return obpeecp.Policy{}, fmt.Errorf("decode policy: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return obpeecp.Policy{}, fmt.Errorf("decode policy: expected one JSON object")
+	}
+	return policy, nil
+}
+
+func fetchOIDCDiscovery(wellKnownURI string) (obpeecp.Discovery, error) {
+	request, err := http.NewRequest(http.MethodGet, wellKnownURI, nil)
+	if err != nil {
+		return obpeecp.Discovery{}, err
+	}
+	response, err := oidcHTTPClient.Do(request)
+	if err != nil {
+		return obpeecp.Discovery{}, fmt.Errorf("fetch OIDC discovery: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return obpeecp.Discovery{}, fmt.Errorf("fetch OIDC discovery: HTTP %d", response.StatusCode)
+	}
+	var discovery obpeecp.Discovery
+	if err := json.NewDecoder(response.Body).Decode(&discovery); err != nil {
+		return obpeecp.Discovery{}, fmt.Errorf("decode OIDC discovery: %w", err)
+	}
+	return discovery, nil
 }
 
 func runClone(args []string, stdout io.Writer) error {
@@ -1738,6 +1832,7 @@ Usage:
   %s clone app --flow authorization-code --name hebe-obp-user
   %s patch app --app-id resource-app-id --allow-offline
   %s plan apps [options]
+  %s export --shape obpee-cp [options]
   %s plan apps [options] -o oci-context-yaml
   %s plan apps [options] -o ochain-env
   %s diagnose apps [options]
@@ -1768,6 +1863,8 @@ Plan options:
     read profile, region, config path, current_service, issuer, and scope defaults from current oci-context
   --oci-context-service obp
     token service name for issuer/scope defaults
+  export --shape obpee-cp
+    renders a secret-free Control Plane OIDC payload from --domain, --app, and --policy
   -o, --output json|text|oci-context-yaml|oci-context-json|commands|ochain-env|ochain-dotenv|ochain-json
 
 Pipe contracts:
@@ -1776,7 +1873,7 @@ Pipe contracts:
   plan apps -o oci-context-yaml can pipe into oci-context service add --set-current
   plan apps -o ochain-env emits OCHAIN_TOKEN_COMMAND
   handoff remains available for saved plan files
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {
