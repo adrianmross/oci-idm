@@ -233,6 +233,145 @@ func TestGetServiceAppsText(t *testing.T) {
 	}
 }
 
+func TestGetDomainsUsesOCIContextAndEnvironmentDefaults(t *testing.T) {
+	t.Setenv("OCI_CLI_PROFILE", "ENV_PROFILE")
+	t.Setenv("OCI_CLI_REGION", "us-ashburn-1")
+	restore := mockOCIContext(t, map[string]string{
+		"export -f json": `{"name":"example-context","profile":"CONTEXT_PROFILE","region":"us-phoenix-1","tenancy_ocid":"ocid1.tenancy.oc1..example","compartment_ocid":"ocid1.compartment.oc1..example"}`,
+		"paths -o json":  `{"oci_config_path":"/tmp/oci-config"}`,
+	})
+	defer restore()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"get", "domains", "-o", "text"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run failed with %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"action: list", "context: example-context", "--compartment-id 'ocid1.compartment.oc1..example'", "--profile 'ENV_PROFILE'", "--region 'us-ashburn-1'"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in output:\n%s", want, out)
+		}
+	}
+}
+
+func TestDescribeDomainRequiresID(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"describe", "domain"}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "--domain-id is required") {
+		t.Fatalf("expected missing domain id error, got %q", stderr.String())
+	}
+}
+
+func TestGetServicesReadsOCIContext(t *testing.T) {
+	restore := mockOCIContext(t, map[string]string{
+		"auth service list -o json": `[{"name":"example-service","issuer":"https://example.identity.oraclecloud.com","scope":"https://service.example.com"}]`,
+	})
+	defer restore()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"get", "services", "-o", "text"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run failed with %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "example-service") || !strings.Contains(stdout.String(), "https://example.identity.oraclecloud.com") {
+		t.Fatalf("unexpected services output: %s", stdout.String())
+	}
+}
+
+func TestPlanAndApplyDomainCreatesAndWaitsForActive(t *testing.T) {
+	var planOut bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"plan", "domain",
+		"--name", "example-control-plane",
+		"--description", "Example Control Plane identity domain",
+		"--license-type", "free",
+		"--home-region", "us-ashburn-1",
+		"--compartment-id", "ocid1.tenancy.oc1..example",
+		"--oci-context=false",
+	}, &planOut, &stderr)
+	if code != 0 {
+		t.Fatalf("plan domain failed with %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(planOut.String(), `"schemaVersion": "oci-idm.domain-plan.v1"`) {
+		t.Fatalf("unexpected domain plan: %s", planOut.String())
+	}
+
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "domain-plan.json")
+	if err := os.WriteFile(planPath, planOut.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restore := mockRunner(func(name string, args ...string) ([]byte, error) {
+		joined := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "iam domain list"):
+			return []byte(`{"data":[]}`), nil
+		case strings.Contains(joined, "iam domain create"):
+			return []byte(`{"data":{"id":"ocid1.domain.oc1..created"}}`), nil
+		case strings.Contains(joined, "iam domain get"):
+			return []byte(`{"data":{"lifecycle-state":"ACTIVE"}}`), nil
+		default:
+			return nil, errors.New("unexpected command: " + joined)
+		}
+	})
+	defer restore()
+
+	var applyOut bytes.Buffer
+	code = Run([]string{"apply", "domain", "-f", planPath, "--execute", "--confirm"}, &applyOut, &stderr)
+	if code != 0 {
+		t.Fatalf("apply domain failed with %d: %s", code, stderr.String())
+	}
+	for _, want := range []string{"created: domain", "id=ocid1.domain.oc1..created", "lifecycle=ACTIVE"} {
+		if !strings.Contains(applyOut.String(), want) {
+			t.Fatalf("expected %q in output:\n%s", want, applyOut.String())
+		}
+	}
+}
+
+func TestApplyDomainReusesMatchingDisplayName(t *testing.T) {
+	plan := domainCreatePlan{
+		SchemaVersion: domainPlanSchemaVersion, CompartmentOCID: "ocid1.tenancy.oc1..example",
+		DisplayName: "example-control-plane", Description: "Example", HomeRegion: "us-ashburn-1",
+		LicenseType: "free", MaxWaitSeconds: 1, WaitIntervalSeconds: 1,
+	}
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "domain-plan.json")
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restore := mockRunner(func(name string, args ...string) ([]byte, error) {
+		joined := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "iam domain list"):
+			return []byte(`{"data":[{"id":"ocid1.domain.oc1..existing","display-name":"example-control-plane"}]}`), nil
+		case strings.Contains(joined, "iam domain get"):
+			return []byte(`{"data":{"lifecycle-state":"ACTIVE"}}`), nil
+		case strings.Contains(joined, "iam domain create"):
+			return nil, errors.New("domain create should not run")
+		default:
+			return nil, errors.New("unexpected command: " + joined)
+		}
+	})
+	defer restore()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"apply", "domain", "-f", planPath, "--execute", "--confirm"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("apply domain failed with %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "reused: domain id=ocid1.domain.oc1..existing lifecycle=ACTIVE") {
+		t.Fatalf("unexpected apply output: %s", stdout.String())
+	}
+}
+
 func TestPatchAppOfflineAccessPlansAndExecutesGuardedSCIMPatch(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

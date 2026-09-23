@@ -72,7 +72,7 @@ available as a compatibility alias.
 Commands that read a plan accept `-f` or `--file`; `--plan` remains available
 as a compatibility alias.
 The preferred command shape is `oci-idm <verb> <resource> [flags]`, similar to
-`kubectl`: `get defaults`, `get service-apps`, `clone app`, `plan apps`,
+`kubectl`: `get defaults`, `get domains`, `get services`, `get service-apps`, `clone app`, `plan apps`,
 `doctor plan`, `materialize plan`, `apply plan`, and `validate plan`.
 
 Inspect the resolved defaults before planning:
@@ -80,6 +80,36 @@ Inspect the resolved defaults before planning:
 ```bash
 oci-idm get defaults --service obp -o text
 ```
+
+List Identity Domains through the current context. This emits the read-only OCI
+CLI command, using explicit flags first, then OCI CLI environment overrides,
+then the selected `oci-context`; it never creates a domain:
+
+```bash
+oci-idm get domains -o text
+oci-idm describe domain --domain-id example-domain-ocid -o text
+```
+
+For a dedicated domain, plan before creating it. The apply command reuses an
+exact display-name match; otherwise it creates the domain only with both
+`--execute` and `--confirm`, then waits until the lifecycle is `ACTIVE`:
+
+```bash
+oci-idm plan domain \
+  --name example-control-plane \
+  --description "Example Control Plane identity domain" \
+  --license-type <approved-license-type> \
+  -o json > domain-plan.json
+
+oci-idm apply domain -f domain-plan.json --execute --confirm
+```
+
+The plan defaults the compartment and home region from the selected
+`oci-context`; pass explicit flags when the domain belongs elsewhere.
+
+`oci-idm get services` lists the metadata-only token services owned by the
+current `oci-context`. Creating, selecting, and authenticating a token service
+remain `oci-context` responsibilities.
 
 For OBP after selecting your OCI context and importing an `oci-context` token
 service, the shortest planning command is:
