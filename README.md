@@ -90,6 +90,23 @@ oci-idm get domains -o text
 oci-idm describe domain --domain-id example-domain-ocid -o text
 ```
 
+For a dedicated domain, plan before creating it. The apply command reuses an
+exact display-name match; otherwise it creates the domain only with both
+`--execute` and `--confirm`, then waits until the lifecycle is `ACTIVE`:
+
+```bash
+oci-idm plan domain \
+  --name example-control-plane \
+  --description "Example Control Plane identity domain" \
+  --license-type <approved-license-type> \
+  -o json > domain-plan.json
+
+oci-idm apply domain -f domain-plan.json --execute --confirm
+```
+
+The plan defaults the compartment and home region from the selected
+`oci-context`; pass explicit flags when the domain belongs elsewhere.
+
 `oci-idm get services` lists the metadata-only token services owned by the
 current `oci-context`. Creating, selecting, and authenticating a token service
 remain `oci-context` responsibilities.

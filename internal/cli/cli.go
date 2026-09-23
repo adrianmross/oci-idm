@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/adrianmross/oci-idm/internal/applyexec"
 	"github.com/adrianmross/oci-idm/internal/diagnose"
@@ -59,6 +60,13 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 		}
 		return 0
 	case "plan":
+		if len(args) > 1 && isResource(args[1], "domain", "domains") {
+			if err := runPlanDomain(args[2:], stdout); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
 		commandArgs, err := stripResourceArg(args[1:], "app", "apps", "identity-app", "identity-apps")
 		if err != nil {
 			fmt.Fprintln(stderr, err)
@@ -126,6 +134,13 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 		}
 		return 0
 	case "apply":
+		if len(args) > 1 && isResource(args[1], "domain", "domains") {
+			if err := runApplyDomain(args[2:], stdout); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
 		commandArgs, err := stripResourceArg(args[1:], "plan", "plans")
 		if err != nil {
 			fmt.Fprintln(stderr, err)
@@ -170,6 +185,16 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 	}
 }
 
+func isResource(value string, allowed ...string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 func runGet(args []string, stdout io.Writer) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return fmt.Errorf("get requires a resource: defaults, domains, services, service-apps, or apps")
@@ -206,7 +231,7 @@ func runDescribe(args []string, stdout io.Writer) error {
 	}
 }
 
-type domainPlan struct {
+type domainDiscoveryPlan struct {
 	SchemaVersion   string `json:"schemaVersion"`
 	Action          string `json:"action"`
 	ContextName     string `json:"contextName,omitempty"`
@@ -266,7 +291,7 @@ func runDomains(args []string, stdout io.Writer, requireDomainID bool) error {
 	if strings.TrimSpace(*region) != "" {
 		parts = append(parts, "--region", shellQuote(*region))
 	}
-	plan := domainPlan{
+	plan := domainDiscoveryPlan{
 		SchemaVersion: "oci-idm.domains.v1", Action: action, ContextName: defaults.ContextName,
 		TenancyOCID: defaults.TenancyOCID, CompartmentOCID: *compartmentID,
 		DomainID: *domainID, Command: strings.Join(parts, " "),
@@ -331,6 +356,368 @@ func runServices(args []string, stdout io.Writer) error {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func commandString(name string, args ...string) string {
+	parts := []string{name}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+const domainPlanSchemaVersion = "oci-idm.domain-plan.v1"
+
+type domainCreatePlan struct {
+	SchemaVersion       string `json:"schemaVersion"`
+	ContextName         string `json:"contextName,omitempty"`
+	CompartmentOCID     string `json:"compartmentOcid"`
+	DisplayName         string `json:"displayName"`
+	Description         string `json:"description"`
+	HomeRegion          string `json:"homeRegion"`
+	LicenseType         string `json:"licenseType"`
+	Profile             string `json:"profile,omitempty"`
+	OCIConfigPath       string `json:"ociConfigPath,omitempty"`
+	Region              string `json:"region,omitempty"`
+	MaxWaitSeconds      int    `json:"maxWaitSeconds"`
+	WaitIntervalSeconds int    `json:"waitIntervalSeconds"`
+	Command             string `json:"command"`
+}
+
+type domainApplyResult struct {
+	SchemaVersion  string `json:"schemaVersion"`
+	Status         string `json:"status"`
+	DomainID       string `json:"domainId,omitempty"`
+	LifecycleState string `json:"lifecycleState,omitempty"`
+	Command        string `json:"command"`
+}
+
+func runPlanDomain(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("plan domain", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var displayName string
+	flags.StringVar(&displayName, "name", "", "Identity Domain display name")
+	flags.StringVar(&displayName, "display-name", "", "Identity Domain display name")
+	description := flags.String("description", "", "Identity Domain description")
+	licenseType := flags.String("license-type", "", "Identity Domain license type")
+	homeRegion := flags.String("home-region", "", "Identity Domain home region; defaults from current oci-context")
+	compartmentID := flags.String("compartment-id", "", "OCI compartment OCID; defaults from current oci-context")
+	profile := flags.String("profile", "", "OCI CLI profile; defaults from current oci-context or OCI_CLI_PROFILE")
+	ociConfigPath := flags.String("oci-config-file", "", "OCI CLI config file; defaults from current oci-context or OCI_CLI_CONFIG_FILE")
+	region := flags.String("region", "", "OCI region; defaults from current oci-context or OCI_CLI_REGION")
+	maxWaitSeconds := flags.Int("max-wait-seconds", 1200, "maximum seconds to wait for the domain to become active")
+	waitIntervalSeconds := flags.Int("wait-interval-seconds", 30, "seconds between lifecycle checks")
+	useOCIContext := flags.Bool("oci-context", true, "read current oci-context defaults for omitted values")
+	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for defaults")
+	var output string
+	addOutputFlags(flags, &output, "json", "output format: json or text")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	defaults := ociContextDefaults{}
+	if *useOCIContext {
+		defaults = loadOCIContextDefaults(*ociContextBin, "")
+		*compartmentID = firstNonEmpty(*compartmentID, defaults.CompartmentOCID, defaults.TenancyOCID)
+		*profile = firstNonEmpty(*profile, defaults.Profile)
+		*ociConfigPath = firstNonEmpty(*ociConfigPath, defaults.OCIConfigPath)
+		*region = firstNonEmpty(*region, defaults.Region)
+		*homeRegion = firstNonEmpty(*homeRegion, defaults.Region)
+	}
+	for field, value := range map[string]string{
+		"--name/--display-name": displayName,
+		"--description":         *description,
+		"--license-type":        *licenseType,
+		"--home-region":         *homeRegion,
+		"--compartment-id":      *compartmentID,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s is required", field)
+		}
+	}
+	if *maxWaitSeconds <= 0 || *waitIntervalSeconds <= 0 {
+		return fmt.Errorf("--max-wait-seconds and --wait-interval-seconds must be positive")
+	}
+	plan := domainCreatePlan{
+		SchemaVersion: domainPlanSchemaVersion, ContextName: defaults.ContextName,
+		CompartmentOCID: *compartmentID, DisplayName: displayName, Description: *description,
+		HomeRegion: *homeRegion, LicenseType: *licenseType, Profile: *profile,
+		OCIConfigPath: *ociConfigPath, Region: *region, MaxWaitSeconds: *maxWaitSeconds,
+		WaitIntervalSeconds: *waitIntervalSeconds,
+	}
+	plan.Command = commandString("oci", domainCreateArgs(plan)...)
+	return writeDomainPlan(stdout, plan, output)
+}
+
+func domainCreateArgs(plan domainCreatePlan) []string {
+	args := []string{
+		"iam", "domain", "create",
+		"--compartment-id", plan.CompartmentOCID,
+		"--display-name", plan.DisplayName,
+		"--description", plan.Description,
+		"--home-region", plan.HomeRegion,
+		"--license-type", plan.LicenseType,
+		"--wait-for-state", "SUCCEEDED",
+		"--max-wait-seconds", fmt.Sprint(plan.MaxWaitSeconds),
+	}
+	return appendDomainCLIOverrides(args, plan)
+}
+
+func domainGetArgs(plan domainCreatePlan, domainID string) []string {
+	return appendDomainCLIOverrides([]string{"iam", "domain", "get", "--domain-id", domainID}, plan)
+}
+
+func domainListArgs(plan domainCreatePlan) []string {
+	return appendDomainCLIOverrides([]string{"iam", "domain", "list", "--compartment-id", plan.CompartmentOCID}, plan)
+}
+
+func appendDomainCLIOverrides(args []string, plan domainCreatePlan) []string {
+	if plan.Profile != "" {
+		args = append(args, "--profile", plan.Profile)
+	}
+	if plan.OCIConfigPath != "" {
+		args = append(args, "--config-file", plan.OCIConfigPath)
+	}
+	if plan.Region != "" {
+		args = append(args, "--region", plan.Region)
+	}
+	return args
+}
+
+func writeDomainPlan(stdout io.Writer, plan domainCreatePlan, output string) error {
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "json":
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(plan)
+	case "text":
+		fmt.Fprintf(stdout, "name: %s\ncompartment: %s\nhomeRegion: %s\nlicenseType: %s\ncommand: %s\n", plan.DisplayName, plan.CompartmentOCID, plan.HomeRegion, plan.LicenseType, plan.Command)
+		return nil
+	default:
+		return fmt.Errorf("unsupported output %q", output)
+	}
+}
+
+func runApplyDomain(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("apply domain", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var planPath string
+	addFileFlags(flags, &planPath, "path to a JSON plan emitted by oci-idm plan domain")
+	execute := flags.Bool("execute", false, "execute OCI domain creation")
+	confirm := flags.Bool("confirm", false, "required with --execute")
+	var output string
+	addOutputFlags(flags, &output, "text", "output format: json or text")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(planPath) == "" {
+		return fmt.Errorf("-f/--file is required")
+	}
+	plan, err := readDomainPlan(planPath)
+	if err != nil {
+		return err
+	}
+	if !*execute {
+		return writeDomainApplyResult(stdout, domainApplyResult{SchemaVersion: "oci-idm.domain-apply.v1", Status: "planned", Command: plan.Command}, output)
+	}
+	if !*confirm {
+		return fmt.Errorf("--execute requires --confirm")
+	}
+	if existingID, err := findExistingDomain(plan); err != nil {
+		return err
+	} else if existingID != "" {
+		state, err := waitForDomainActive(plan, existingID)
+		if err != nil {
+			return err
+		}
+		return writeDomainApplyResult(stdout, domainApplyResult{SchemaVersion: "oci-idm.domain-apply.v1", Status: "reused", DomainID: existingID, LifecycleState: state, Command: plan.Command}, output)
+	}
+	out, err := runCommand("oci", domainCreateArgs(plan)...)
+	if err != nil {
+		return fmt.Errorf("create identity domain: %w", err)
+	}
+	domainID := responseID(out)
+	if domainID == "" {
+		return fmt.Errorf("create identity domain returned no domain id")
+	}
+	state, err := waitForDomainActive(plan, domainID)
+	if err != nil {
+		return err
+	}
+	return writeDomainApplyResult(stdout, domainApplyResult{SchemaVersion: "oci-idm.domain-apply.v1", Status: "created", DomainID: domainID, LifecycleState: state, Command: plan.Command}, output)
+}
+
+func readDomainPlan(path string) (domainCreatePlan, error) {
+	var data []byte
+	var err error
+	if strings.TrimSpace(path) == "-" {
+		data, err = io.ReadAll(stdinReader)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return domainCreatePlan{}, err
+	}
+	var plan domainCreatePlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return domainCreatePlan{}, err
+	}
+	if plan.SchemaVersion != domainPlanSchemaVersion {
+		return domainCreatePlan{}, fmt.Errorf("unsupported domain plan schema %q", plan.SchemaVersion)
+	}
+	if plan.DisplayName == "" || plan.Description == "" || plan.HomeRegion == "" || plan.LicenseType == "" || plan.CompartmentOCID == "" || plan.MaxWaitSeconds <= 0 || plan.WaitIntervalSeconds <= 0 {
+		return domainCreatePlan{}, fmt.Errorf("domain plan is incomplete")
+	}
+	plan.Command = commandString("oci", domainCreateArgs(plan)...)
+	return plan, nil
+}
+
+func findExistingDomain(plan domainCreatePlan) (string, error) {
+	out, err := runCommand("oci", domainListArgs(plan)...)
+	if err != nil {
+		return "", fmt.Errorf("list identity domains before create: %w", err)
+	}
+	return domainIDByDisplayName(out, plan.DisplayName), nil
+}
+
+func domainIDByDisplayName(data []byte, displayName string) string {
+	var value any
+	if json.Unmarshal(data, &value) != nil {
+		return ""
+	}
+	return findDomainID(value, displayName)
+}
+
+func responseID(data []byte) string {
+	var value any
+	if json.Unmarshal(data, &value) != nil {
+		return ""
+	}
+	return findResponseID(value)
+}
+
+func findResponseID(value any) string {
+	switch item := value.(type) {
+	case map[string]any:
+		if id := stringValue(item["id"]); id != "" {
+			return id
+		}
+		for _, child := range item {
+			if id := findResponseID(child); id != "" {
+				return id
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if id := findResponseID(child); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func findDomainID(value any, displayName string) string {
+	switch item := value.(type) {
+	case map[string]any:
+		name := firstNonEmpty(stringValue(item["display-name"]), stringValue(item["displayName"]))
+		if name == displayName {
+			return stringValue(item["id"])
+		}
+		for _, child := range item {
+			if id := findDomainID(child, displayName); id != "" {
+				return id
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if id := findDomainID(child, displayName); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func waitForDomainActive(plan domainCreatePlan, domainID string) (string, error) {
+	deadline := time.Now().Add(time.Duration(plan.MaxWaitSeconds) * time.Second)
+	for {
+		out, err := runCommand("oci", domainGetArgs(plan, domainID)...)
+		if err != nil {
+			return "", fmt.Errorf("get identity domain %s: %w", domainID, err)
+		}
+		state := domainLifecycleState(out)
+		if state == "ACTIVE" {
+			return state, nil
+		}
+		if state == "FAILED" || state == "INACTIVE" {
+			return state, fmt.Errorf("identity domain %s reached %s", domainID, state)
+		}
+		if time.Now().After(deadline) {
+			return state, fmt.Errorf("identity domain %s did not become ACTIVE before timeout (last state %q)", domainID, state)
+		}
+		time.Sleep(time.Duration(plan.WaitIntervalSeconds) * time.Second)
+	}
+}
+
+func domainLifecycleState(data []byte) string {
+	var value any
+	if json.Unmarshal(data, &value) != nil {
+		return ""
+	}
+	return findLifecycleState(value)
+}
+
+func findLifecycleState(value any) string {
+	switch item := value.(type) {
+	case map[string]any:
+		if state := firstNonEmpty(stringValue(item["lifecycle-state"]), stringValue(item["lifecycleState"])); state != "" {
+			return strings.ToUpper(state)
+		}
+		for _, child := range item {
+			if state := findLifecycleState(child); state != "" {
+				return state
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if state := findLifecycleState(child); state != "" {
+				return state
+			}
+		}
+	}
+	return ""
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func writeDomainApplyResult(stdout io.Writer, result domainApplyResult, output string) error {
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "json":
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(result)
+	case "text":
+		fmt.Fprintf(stdout, "%s: domain", result.Status)
+		if result.DomainID != "" {
+			fmt.Fprintf(stdout, " id=%s", result.DomainID)
+		}
+		if result.LifecycleState != "" {
+			fmt.Fprintf(stdout, " lifecycle=%s", result.LifecycleState)
+		}
+		fmt.Fprintf(stdout, "\ncommand: %s\n", result.Command)
+		return nil
+	default:
+		return fmt.Errorf("unsupported output %q", output)
+	}
 }
 
 func stripResourceArg(args []string, allowed ...string) ([]string, error) {
@@ -1343,6 +1730,8 @@ Usage:
   %s get defaults [options]
   %s get domains [options]
   %s describe domain --domain-id domain-ocid
+  %s plan domain --name example-domain --description '...' --license-type <type>
+  %s apply domain -f domain-plan.json --execute --confirm
   %s get services [options]
   %s get service-apps [options]
   %s describe service-app [options]
@@ -1387,7 +1776,7 @@ Pipe contracts:
   plan apps -o oci-context-yaml can pipe into oci-context service add --set-current
   plan apps -o ochain-env emits OCHAIN_TOKEN_COMMAND
   handoff remains available for saved plan files
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {
