@@ -282,7 +282,7 @@ oci-context auth token --no-login --format raw
 
 `clone app` emits a standard `oci-context` handoff document by default. It does
 not print secrets. Use the existing `plan apps`, `materialize plan`, and
-`apply plan --execute --confirm` path when you need reviewable payload files and
+`apply plan --confirm` path when you need reviewable payload files and
 live Identity Domains creation. Authorization-code handoffs include
 `offlineAccess: true`, so `oci-context` requests `offline_access` and can cache
 the refresh token enabled by the generated app.
@@ -454,15 +454,14 @@ grants for the OBP `ADMIN` and `REST_CLIENT` app roles.
 
 ## Apply Model
 
-By default, `apply` remains a dry-run convenience wrapper around
-materialization:
+Use `materialize plan` for local review artifacts:
 
 ```bash
-oci-idm apply plan -f idm-plan.json --out ./idm-artifacts
+oci-idm materialize plan -f idm-plan.json --out ./idm-artifacts
 ```
 
-For reviewed plans, `apply plan --execute --confirm` can run the OCI Identity
-Domains changes directly. The executor is intentionally conservative:
+For reviewed plans, `apply plan --confirm` runs the OCI Identity Domains changes
+directly. The executor is intentionally conservative:
 
 - it searches for existing apps by name before creating them
 - it searches for existing same-name principal users before creating them
@@ -474,7 +473,6 @@ Domains changes directly. The executor is intentionally conservative:
 oci-idm apply plan \
   -f idm-plan.json \
   --out ./idm-apply \
-  --execute \
   --confirm \
   -o text
 ```
@@ -482,6 +480,7 @@ oci-idm apply plan \
 JWT service plans still need real certificate material before direct execution.
 Materialize first, replace placeholders such as
 `<x509-base64-der-certificate>` and preset role ids, then rerun direct apply.
+`--execute` remains a no-op compatibility flag and can be removed from scripts.
 
 ## Compatibility
 

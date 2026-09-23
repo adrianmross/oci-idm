@@ -816,25 +816,22 @@ func TestMaterializeAndValidate(t *testing.T) {
 		"-f", planPath,
 		"--out", applyDir,
 	}, &applyOut, &stderr)
-	if code != 0 {
-		t.Fatalf("apply failed with %d: %s", code, stderr.String())
+	if code == 0 || !strings.Contains(stderr.String(), "--confirm is required") {
+		t.Fatalf("apply without confirmation did not fail closed: %s", stderr.String())
 	}
-	if !strings.Contains(applyOut.String(), "dry-run apply artifacts") {
-		t.Fatalf("unexpected apply output: %s", applyOut.String())
-	}
-
+	stderr.Reset()
 	code = Run([]string{
 		"apply", "plan",
 		"-f", planPath,
 		"--out", applyDir,
 		"--execute",
 	}, &applyOut, &stderr)
-	if code == 0 {
-		t.Fatal("expected execute mode to fail closed")
+	if code == 0 || !strings.Contains(stderr.String(), "--confirm is required") {
+		t.Fatalf("compatibility --execute did not retain the confirmation gate: %s", stderr.String())
 	}
 }
 
-func TestApplyExecuteCreatesApp(t *testing.T) {
+func TestApplyCreatesApp(t *testing.T) {
 	restore := mockRunner(func(name string, args ...string) ([]byte, error) {
 		joined := name + " " + strings.Join(args, " ")
 		switch {
@@ -866,9 +863,9 @@ func TestApplyExecuteCreatesApp(t *testing.T) {
 	}
 
 	var applyOut bytes.Buffer
-	code = Run([]string{"apply", "plan", "-f", planPath, "--out", filepath.Join(dir, "apply"), "--execute", "--confirm", "-o", "text"}, &applyOut, &stderr)
+	code = Run([]string{"apply", "plan", "-f", planPath, "--out", filepath.Join(dir, "apply"), "--confirm", "-o", "text"}, &applyOut, &stderr)
 	if code != 0 {
-		t.Fatalf("apply execute failed with %d: %s", code, stderr.String())
+		t.Fatalf("apply failed with %d: %s", code, stderr.String())
 	}
 	if !strings.Contains(applyOut.String(), "created: app-") || !strings.Contains(applyOut.String(), "id=created-app-id") {
 		t.Fatalf("unexpected apply output:\n%s", applyOut.String())

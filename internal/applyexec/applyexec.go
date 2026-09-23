@@ -46,7 +46,7 @@ func Execute(plan planner.Plan, outDir string, runner Runner) (Result, error) {
 	for _, app := range plan.Apps {
 		for _, action := range app.OCIPreCreate {
 			if hasPlaceholder(action.Payload) {
-				return result, fmt.Errorf("%s contains placeholders; materialize, fill %s, then rerun apply --execute", action.Key, action.PayloadFile)
+				return result, fmt.Errorf("%s contains placeholders; materialize, fill %s, then rerun apply --confirm", action.Key, action.PayloadFile)
 			}
 			id, step, err := createFromPayload(plan.Target, outDir, action.PayloadFile, "o-auth-client-certificate", action.Payload, runner)
 			step.Key = action.Key

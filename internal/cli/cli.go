@@ -1207,8 +1207,8 @@ func runApply(args []string, stdout io.Writer) error {
 	var planPath string
 	addFileFlags(flags, &planPath, "path to a JSON plan emitted by oci-idm plan, or - for stdin")
 	outDir := flags.String("out", "", "directory for generated apply artifacts")
-	execute := flags.Bool("execute", false, "execute OCI changes directly")
-	confirm := flags.Bool("confirm", false, "required with --execute")
+	flags.Bool("execute", false, "deprecated compatibility flag; apply always executes")
+	confirm := flags.Bool("confirm", false, "required before OCI changes")
 	var output string
 	addOutputFlags(flags, &output, "text", "output format: text or json")
 	if err := flags.Parse(args); err != nil {
@@ -1220,27 +1220,18 @@ func runApply(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(planPath) == "" {
 		return fmt.Errorf("-f/--file is required")
 	}
-	if *execute {
-		if !*confirm {
-			return fmt.Errorf("--execute requires --confirm")
-		}
-		plan, err := readPlanFile(planPath)
-		if err != nil {
-			return err
-		}
-		result, err := applyexec.Execute(plan, *outDir, applyexec.Runner(runCommand))
-		if err != nil {
-			return err
-		}
-		return printApplyResult(stdout, result, output)
+	if !*confirm {
+		return fmt.Errorf("--confirm is required to apply changes; use materialize plan for local review artifacts")
 	}
-	result, err := materialize.FromPlanFile(planPath, *outDir)
+	plan, err := readPlanFile(planPath)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "dry-run apply artifacts written to %s\n", result.OutDir)
-	fmt.Fprintf(stdout, "review payloads, replace placeholders, then run %s\n", result.OutDir+"/apply.sh")
-	return nil
+	result, err := applyexec.Execute(plan, *outDir, applyexec.Runner(runCommand))
+	if err != nil {
+		return err
+	}
+	return printApplyResult(stdout, result, output)
 }
 
 func runDiscover(args []string, stdout io.Writer) error {
@@ -1840,8 +1831,7 @@ Usage:
   %s materialize plan -f plan.json --out ./idcs-artifacts
   %s handoff -f plan.json --target oci-context -o yaml
   %s handoff -f plan.json --import --out ./idcs-artifacts
-  %s apply plan -f plan.json --out ./idcs-artifacts
-  %s apply plan -f plan.json --execute --confirm
+  %s apply plan -f plan.json --confirm
   %s validate plan -f plan.json
   %s version
 
@@ -1873,7 +1863,7 @@ Pipe contracts:
   plan apps -o oci-context-yaml can pipe into oci-context service add --set-current
   plan apps -o ochain-env emits OCHAIN_TOKEN_COMMAND
   handoff remains available for saved plan files
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {
