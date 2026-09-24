@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,15 +17,17 @@ import (
 	"github.com/adrianmross/oci-idm/internal/doctor"
 	"github.com/adrianmross/oci-idm/internal/handoff"
 	"github.com/adrianmross/oci-idm/internal/materialize"
+	"github.com/adrianmross/oci-idm/internal/obpeecp"
 	"github.com/adrianmross/oci-idm/internal/planner"
 	"github.com/adrianmross/oci-idm/internal/validation"
 )
 
 var (
-	version     = "dev"
-	commit      = "none"
-	date        = "unknown"
-	stdinReader = io.Reader(os.Stdin)
+	version        = "dev"
+	commit         = "none"
+	date           = "unknown"
+	stdinReader    = io.Reader(os.Stdin)
+	oidcHTTPClient = http.DefaultClient
 )
 
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -77,6 +80,12 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 			return 1
 		}
 		return 0
+	case "export":
+		if err := runExport(args[1:], stdout); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	case "clone":
 		commandArgs, err := stripResourceArg(args[1:], "app", "apps", "identity-app", "identity-apps")
 		if err != nil {
@@ -95,6 +104,17 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 			return 1
 		}
 		if err := runPatchApp(commandArgs, stdout); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	case "assign":
+		commandArgs, err := stripResourceArg(args[1:], "app-role", "app-roles")
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if err := runAssignAppRole(commandArgs, stdout); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -902,6 +922,91 @@ func runPlan(args []string, stdout io.Writer) error {
 	return printPlanOutput(stdout, plan, output, *tokenService)
 }
 
+func runExport(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("export", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	domain := flags.String("domain", "", "Identity Domains issuer URL")
+	app := flags.String("app", "", "Identity Domains OAuth client ID")
+	controlPlaneURL := flags.String("control-plane-url", "", "Control Plane base URL")
+	redirectURI := flags.String("redirect-uri", "", "Control Plane OAuth callback URL; defaults from --control-plane-url")
+	policyPath := flags.String("policy", "", "path to secret-free OBPEE Control Plane policy JSON")
+	shape := flags.String("shape", "", "render target: obpee-cp")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.ToLower(strings.TrimSpace(*shape)) != "obpee-cp" {
+		return fmt.Errorf("--shape obpee-cp is required")
+	}
+	if strings.TrimSpace(*domain) == "" || strings.TrimSpace(*app) == "" || strings.TrimSpace(*controlPlaneURL) == "" || strings.TrimSpace(*policyPath) == "" {
+		return fmt.Errorf("--domain, --app, --control-plane-url, and --policy are required")
+	}
+	if strings.TrimSpace(*redirectURI) == "" {
+		*redirectURI = strings.TrimRight(strings.TrimSpace(*controlPlaneURL), "/") + "/api/v1/auth/provider/code"
+	}
+	policy, err := readOBPEEPolicy(*policyPath)
+	if err != nil {
+		return err
+	}
+	wellKnownURI, err := obpeecp.WellKnownURI(*domain)
+	if err != nil {
+		return err
+	}
+	discovery, err := fetchOIDCDiscovery(wellKnownURI)
+	if err != nil {
+		return err
+	}
+	document, err := obpeecp.Build(obpeecp.Input{
+		Domain: *domain, App: *app, ControlPlaneURL: *controlPlaneURL, RedirectURI: *redirectURI,
+		Policy: policy, Discovery: discovery,
+	})
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(document)
+}
+
+func readOBPEEPolicy(path string) (obpeecp.Policy, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return obpeecp.Policy{}, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var policy obpeecp.Policy
+	if err := decoder.Decode(&policy); err != nil {
+		return obpeecp.Policy{}, fmt.Errorf("decode policy: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return obpeecp.Policy{}, fmt.Errorf("decode policy: expected one JSON object")
+	}
+	return policy, nil
+}
+
+func fetchOIDCDiscovery(wellKnownURI string) (obpeecp.Discovery, error) {
+	request, err := http.NewRequest(http.MethodGet, wellKnownURI, nil)
+	if err != nil {
+		return obpeecp.Discovery{}, err
+	}
+	response, err := oidcHTTPClient.Do(request)
+	if err != nil {
+		return obpeecp.Discovery{}, fmt.Errorf("fetch OIDC discovery: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return obpeecp.Discovery{}, fmt.Errorf("fetch OIDC discovery: HTTP %d", response.StatusCode)
+	}
+	var discovery obpeecp.Discovery
+	if err := json.NewDecoder(response.Body).Decode(&discovery); err != nil {
+		return obpeecp.Discovery{}, fmt.Errorf("decode OIDC discovery: %w", err)
+	}
+	return discovery, nil
+}
+
 func runClone(args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("clone", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -1113,8 +1218,8 @@ func runApply(args []string, stdout io.Writer) error {
 	var planPath string
 	addFileFlags(flags, &planPath, "path to a JSON plan emitted by oci-idm plan, or - for stdin")
 	outDir := flags.String("out", "", "directory for generated apply artifacts")
-	execute := flags.Bool("execute", false, "execute OCI changes directly")
-	confirm := flags.Bool("confirm", false, "required with --execute")
+	flags.Bool("execute", false, "deprecated compatibility flag; apply always executes")
+	confirm := flags.Bool("confirm", false, "required before OCI changes")
 	var output string
 	addOutputFlags(flags, &output, "text", "output format: text or json")
 	if err := flags.Parse(args); err != nil {
@@ -1126,27 +1231,18 @@ func runApply(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(planPath) == "" {
 		return fmt.Errorf("-f/--file is required")
 	}
-	if *execute {
-		if !*confirm {
-			return fmt.Errorf("--execute requires --confirm")
-		}
-		plan, err := readPlanFile(planPath)
-		if err != nil {
-			return err
-		}
-		result, err := applyexec.Execute(plan, *outDir, applyexec.Runner(runCommand))
-		if err != nil {
-			return err
-		}
-		return printApplyResult(stdout, result, output)
+	if !*confirm {
+		return fmt.Errorf("--confirm is required to apply changes; use materialize plan for local review artifacts")
 	}
-	result, err := materialize.FromPlanFile(planPath, *outDir)
+	plan, err := readPlanFile(planPath)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "dry-run apply artifacts written to %s\n", result.OutDir)
-	fmt.Fprintf(stdout, "review payloads, replace placeholders, then run %s\n", result.OutDir+"/apply.sh")
-	return nil
+	result, err := applyexec.Execute(plan, *outDir, applyexec.Runner(runCommand))
+	if err != nil {
+		return err
+	}
+	return printApplyResult(stdout, result, output)
 }
 
 func runDiscover(args []string, stdout io.Writer) error {
@@ -1215,26 +1311,52 @@ func runDiscover(args []string, stdout io.Writer) error {
 }
 
 type appPatchPlan struct {
-	SchemaVersion       string   `json:"schemaVersion"`
-	AppID               string   `json:"appId"`
-	IDCSEndpoint        string   `json:"idcsEndpoint"`
-	AllowOffline        bool     `json:"allowOffline"`
-	CurrentAllowOffline *bool    `json:"currentAllowOffline,omitempty"`
-	Status              string   `json:"status"`
-	Command             string   `json:"command"`
-	Args                []string `json:"args"`
-	Executed            bool     `json:"executed"`
+	SchemaVersion        string              `json:"schemaVersion"`
+	AppID                string              `json:"appId"`
+	IDCSEndpoint         string              `json:"idcsEndpoint"`
+	AllowOffline         bool                `json:"allowOffline,omitempty"`
+	AddRedirectURIs      []string            `json:"addRedirectUris,omitempty"`
+	AddGrants            []string            `json:"addGrants,omitempty"`
+	CurrentAllowOffline  *bool               `json:"currentAllowOffline,omitempty"`
+	CurrentRedirectURIs  []string            `json:"currentRedirectUris,omitempty"`
+	CurrentAllowedGrants []string            `json:"currentAllowedGrants,omitempty"`
+	Operations           []appPatchOperation `json:"operations,omitempty"`
+	Status               string              `json:"status"`
+	Command              string              `json:"command,omitempty"`
+	Args                 []string            `json:"args,omitempty"`
+	Executed             bool                `json:"executed"`
 }
 
 type appPatchState struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	IsOPCService       bool   `json:"is-opc-service"`
-	AllowOffline       bool   `json:"allow-offline"`
-	ServiceTypeURN     string `json:"service-type-urn"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	IsOPCService       bool     `json:"is-opc-service"`
+	AllowOffline       bool     `json:"allow-offline"`
+	RedirectURIs       []string `json:"redirect-uris"`
+	AllowedGrants      []string `json:"allowed-grants"`
+	ServiceTypeURN     string   `json:"service-type-urn"`
 	EditableAttributes []struct {
 		Name string `json:"name"`
 	} `json:"editable-attributes"`
+}
+
+type appPatchOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value"`
+}
+
+type stringList []string
+
+func (values *stringList) String() string { return strings.Join(*values, ",") }
+
+func (values *stringList) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("value cannot be empty")
+	}
+	*values = append(*values, value)
+	return nil
 }
 
 func runPatchApp(args []string, stdout io.Writer) error {
@@ -1244,15 +1366,19 @@ func runPatchApp(args []string, stdout io.Writer) error {
 	issuer := flags.String("issuer", "", "OCI Identity Domains issuer URL")
 	idcsEndpoint := flags.String("idcs-endpoint", "", "OCI Identity Domains base endpoint")
 	allowOffline := flags.Bool("allow-offline", false, "allow the resource app to issue refresh tokens")
+	var addRedirectURIs stringList
+	var addGrants stringList
+	flags.Var(&addRedirectURIs, "add-redirect-uri", "redirect URI to add; repeat for multiple values")
+	flags.Var(&addGrants, "add-grant", "OAuth grant type to add; repeat for multiple values")
 	profile := flags.String("profile", "", "OCI CLI profile; defaults from current oci-context")
 	ociConfigPath := flags.String("oci-config-file", "", "OCI CLI config file; defaults from current oci-context")
 	region := flags.String("region", "", "OCI region; defaults from current oci-context")
 	useOCIContext := flags.Bool("oci-context", true, "read current oci-context defaults for omitted values")
 	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for defaults")
 	ociContextService := flags.String("oci-context-service", string(planner.ServiceOBP), "oci-context token service used for issuer defaults")
-	execute := flags.Bool("execute", false, "execute the OCI SCIM patch")
-	confirm := flags.Bool("confirm", false, "required with --execute")
-	preflight := flags.Bool("preflight", true, "read app state and reject protected Oracle service attributes")
+	flags.Bool("execute", false, "deprecated compatibility flag; --confirm applies the patch")
+	confirm := flags.Bool("confirm", false, "required before OCI changes")
+	preflight := flags.Bool("preflight", true, "read app state, calculate missing values, and verify the result")
 	var output string
 	addOutputFlags(flags, &output, "json", "output format: json or text")
 	if err := flags.Parse(args); err != nil {
@@ -1265,11 +1391,11 @@ func runPatchApp(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(*appID) == "" {
 		return fmt.Errorf("--app-id is required")
 	}
-	if !visited["allow-offline"] || !*allowOffline {
-		return fmt.Errorf("--allow-offline must be explicitly set")
+	if (!visited["allow-offline"] || !*allowOffline) && len(addRedirectURIs) == 0 && len(addGrants) == 0 {
+		return fmt.Errorf("set --allow-offline, --add-redirect-uri, or --add-grant")
 	}
-	if *execute && !*confirm {
-		return fmt.Errorf("--execute requires --confirm")
+	if !*preflight {
+		return fmt.Errorf("--preflight=false is not supported; patch app always reads and verifies live state")
 	}
 	if *useOCIContext {
 		defaults := loadOCIContextDefaults(*ociContextBin, *ociContextService)
@@ -1291,13 +1417,42 @@ func runPatchApp(args []string, stdout io.Writer) error {
 		return fmt.Errorf("--issuer or --idcs-endpoint is required")
 	}
 	endpoint = strings.TrimRight(endpoint, "/")
-	commandArgs := []string{
-		"identity-domains", "app", "patch",
-		"--endpoint", endpoint,
-		"--app-id", *appID,
-		"--schemas", `["urn:ietf:params:scim:api:messages:2.0:PatchOp"]`,
-		"--operations", `[{"op":"replace","path":"allowOffline","value":true}]`,
+	plan := appPatchPlan{
+		SchemaVersion:   "oci-idm.app-patch.v1",
+		AppID:           *appID,
+		IDCSEndpoint:    endpoint,
+		AllowOffline:    visited["allow-offline"] && *allowOffline,
+		AddRedirectURIs: uniqueStrings(addRedirectURIs),
+		AddGrants:       uniqueStrings(addGrants),
+		Status:          "planned",
 	}
+	state, err := getAppPatchState(endpoint, *appID, *profile, *ociConfigPath, *region)
+	if err != nil {
+		return fmt.Errorf("inspect app %s before patch: %w", *appID, err)
+	}
+	plan.CurrentAllowOffline = boolPtr(state.AllowOffline)
+	plan.CurrentRedirectURIs = state.RedirectURIs
+	plan.CurrentAllowedGrants = state.AllowedGrants
+	plan.Operations = appPatchOperations(state, plan)
+	if len(plan.Operations) == 0 {
+		plan.Status = "already-configured"
+		return writeAppPatchPlan(stdout, output, plan)
+	}
+	if state.IsOPCService {
+		for _, operation := range plan.Operations {
+			if !appAttributeEditable(state, operation.Path) {
+				return fmt.Errorf("app %s (%s) is an Oracle service app (%s) that protects %s; ask the Oracle service owner or support", firstNonEmpty(state.ID, *appID), firstNonEmpty(state.Name, "unknown"), firstNonEmpty(state.ServiceTypeURN, "unknown service"), operation.Path)
+			}
+		}
+	}
+	if !*confirm {
+		return fmt.Errorf("--confirm is required to patch app changes")
+	}
+	operations, err := json.Marshal(plan.Operations)
+	if err != nil {
+		return err
+	}
+	commandArgs := []string{"identity-domains", "app", "patch", "--endpoint", endpoint, "--app-id", *appID, "--schemas", `["urn:ietf:params:scim:api:messages:2.0:PatchOp"]`, "--operations", string(operations)}
 	if strings.TrimSpace(*profile) != "" {
 		commandArgs = append(commandArgs, "--profile", *profile)
 	}
@@ -1307,48 +1462,52 @@ func runPatchApp(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(*region) != "" {
 		commandArgs = append(commandArgs, "--region", *region)
 	}
-	plan := appPatchPlan{
-		SchemaVersion: "oci-idm.app-patch.v1",
-		AppID:         *appID,
-		IDCSEndpoint:  endpoint,
-		AllowOffline:  true,
-		Status:        "planned",
-		Command:       "oci",
-		Args:          commandArgs,
+	plan.Command, plan.Args = "oci", commandArgs
+	if _, err := runCommand("oci", commandArgs...); err != nil {
+		return fmt.Errorf("patch app %s: %w", *appID, err)
 	}
-	if *preflight {
-		state, err := getAppPatchState(endpoint, *appID, *profile, *ociConfigPath, *region)
-		if err != nil {
-			return fmt.Errorf("inspect app %s before patch: %w", *appID, err)
-		}
-		plan.CurrentAllowOffline = boolPtr(state.AllowOffline)
-		if state.AllowOffline {
-			plan.Status = "already-enabled"
-			return writeAppPatchPlan(stdout, output, plan)
-		}
-		if state.IsOPCService && !appAttributeEditable(state, "allowOffline") {
-			return fmt.Errorf(
-				"app %s (%s) is an Oracle service app (%s) that protects allowOffline; Identity Domains cannot enable refresh tokens on this seeded resource app. Ask the Oracle service owner or support to enable it, or use short-lived user login or client credentials",
-				firstNonEmpty(state.ID, *appID), firstNonEmpty(state.Name, "unknown"), firstNonEmpty(state.ServiceTypeURN, "unknown service"),
-			)
-		}
+	plan.Executed, plan.Status = true, "updated"
+	state, err = getAppPatchState(endpoint, *appID, *profile, *ociConfigPath, *region)
+	if err != nil {
+		return fmt.Errorf("verify app %s after patch: %w", *appID, err)
 	}
-	if *execute {
-		if _, err := runCommand("oci", commandArgs...); err != nil {
-			return fmt.Errorf("patch app %s: %w", *appID, err)
-		}
-		plan.Executed = true
-		plan.Status = "updated"
-		state, err := getAppPatchState(endpoint, *appID, *profile, *ociConfigPath, *region)
-		if err != nil {
-			return fmt.Errorf("verify app %s after patch: %w", *appID, err)
-		}
-		plan.CurrentAllowOffline = boolPtr(state.AllowOffline)
-		if !state.AllowOffline {
-			return fmt.Errorf("patch app %s completed but allowOffline is still false", *appID)
-		}
+	plan.CurrentAllowOffline = boolPtr(state.AllowOffline)
+	plan.CurrentRedirectURIs, plan.CurrentAllowedGrants = state.RedirectURIs, state.AllowedGrants
+	if len(appPatchOperations(state, plan)) != 0 {
+		return fmt.Errorf("patch app %s completed but requested values are still missing", *appID)
 	}
 	return writeAppPatchPlan(stdout, output, plan)
+}
+
+func appPatchOperations(state appPatchState, plan appPatchPlan) []appPatchOperation {
+	operations := []appPatchOperation{}
+	if plan.AllowOffline && !state.AllowOffline {
+		operations = append(operations, appPatchOperation{Op: "replace", Path: "allowOffline", Value: true})
+	}
+	if missing := missingStrings(plan.AddRedirectURIs, state.RedirectURIs); len(missing) > 0 {
+		operations = append(operations, appPatchOperation{Op: "add", Path: "redirectUris", Value: missing})
+	}
+	if missing := missingStrings(plan.AddGrants, state.AllowedGrants); len(missing) > 0 {
+		operations = append(operations, appPatchOperation{Op: "add", Path: "allowedGrants", Value: missing})
+	}
+	return operations
+}
+
+func uniqueStrings(values []string) []string { return missingStrings(values, nil) }
+
+func missingStrings(want []string, have []string) []string {
+	seen := map[string]bool{}
+	for _, value := range have {
+		seen[value] = true
+	}
+	missing := []string{}
+	for _, value := range want {
+		if !seen[value] {
+			seen[value] = true
+			missing = append(missing, value)
+		}
+	}
+	return missing
 }
 
 func getAppPatchState(endpoint string, appID string, profile string, ociConfigPath string, region string) (appPatchState, error) {
@@ -1356,7 +1515,7 @@ func getAppPatchState(endpoint string, appID string, profile string, ociConfigPa
 		"identity-domains", "app", "get",
 		"--endpoint", endpoint,
 		"--app-id", appID,
-		"--attributes", "id,name,isOPCService,allowOffline,editableAttributes,serviceTypeURN",
+		"--attributes", "id,name,isOPCService,allowOffline,redirectUris,allowedGrants,editableAttributes,serviceTypeURN",
 	}
 	if strings.TrimSpace(profile) != "" {
 		args = append(args, "--profile", profile)
@@ -1400,8 +1559,231 @@ func writeAppPatchPlan(stdout io.Writer, output string, plan appPatchPlan) error
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(plan)
 	case "text":
-		fmt.Fprintf(stdout, "appId: %s\nallowOffline: true\nstatus: %s\nexecuted: %t\n", plan.AppID, plan.Status, plan.Executed)
-		fmt.Fprintf(stdout, "command: %s %s\n", plan.Command, strings.Join(plan.Args, " "))
+		fmt.Fprintf(stdout, "appId: %s\nstatus: %s\nexecuted: %t\n", plan.AppID, plan.Status, plan.Executed)
+		if plan.Command != "" {
+			fmt.Fprintf(stdout, "command: %s %s\n", plan.Command, strings.Join(plan.Args, " "))
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported output %q", output)
+	}
+}
+
+type appRoleAssignment struct {
+	SchemaVersion  string `json:"schemaVersion"`
+	AppID          string `json:"appId"`
+	RoleID         string `json:"roleId"`
+	PrincipalType  string `json:"principalType"`
+	PrincipalID    string `json:"principalId"`
+	GrantMechanism string `json:"grantMechanism"`
+	Status         string `json:"status"`
+	Executed       bool   `json:"executed"`
+}
+
+func runAssignAppRole(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("assign app-role", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	appID := flags.String("app-id", "", "Identity Domains resource app id")
+	roleID := flags.String("role-id", "", "Identity Domains app-role id")
+	userID := flags.String("user-id", "", "Identity Domains user id")
+	groupID := flags.String("group-id", "", "Identity Domains group id")
+	currentUser := flags.Bool("current-user", false, "resolve the current oci-context token subject to an Identity Domains user")
+	flags.BoolVar(currentUser, "me", false, "alias for --current-user")
+	issuer := flags.String("issuer", "", "OCI Identity Domains issuer URL")
+	idcsEndpoint := flags.String("idcs-endpoint", "", "OCI Identity Domains base endpoint")
+	profile := flags.String("profile", "", "OCI CLI profile; defaults from current oci-context")
+	ociConfigPath := flags.String("oci-config-file", "", "OCI CLI config file; defaults from current oci-context")
+	region := flags.String("region", "", "OCI region; defaults from current oci-context")
+	useOCIContext := flags.Bool("oci-context", true, "read current oci-context defaults for omitted values")
+	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for defaults")
+	ociContextService := flags.String("oci-context-service", string(planner.ServiceOBP), "oci-context token service used for issuer defaults")
+	confirm := flags.Bool("confirm", false, "required before creating an app-role assignment")
+	var output string
+	addOutputFlags(flags, &output, "json", "output format: json or text")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(*appID) == "" || strings.TrimSpace(*roleID) == "" {
+		return fmt.Errorf("--app-id and --role-id are required")
+	}
+	principalCount := 0
+	if strings.TrimSpace(*userID) != "" {
+		principalCount++
+	}
+	if strings.TrimSpace(*groupID) != "" {
+		principalCount++
+	}
+	if *currentUser {
+		principalCount++
+	}
+	if principalCount != 1 {
+		return fmt.Errorf("set exactly one of --user-id, --group-id, or --current-user")
+	}
+	visited := collectVisitedFlags(flags)
+	if *useOCIContext {
+		defaults := loadOCIContextDefaults(*ociContextBin, *ociContextService)
+		if !explicitFlags(visited, "issuer") && strings.TrimSpace(*issuer) == "" {
+			*issuer = defaults.Issuer
+		}
+		if !explicitFlags(visited, "profile") && strings.TrimSpace(*profile) == "" {
+			*profile = defaults.Profile
+		}
+		if !explicitFlags(visited, "oci-config-file") && strings.TrimSpace(*ociConfigPath) == "" {
+			*ociConfigPath = defaults.OCIConfigPath
+		}
+		if !explicitFlags(visited, "region") && strings.TrimSpace(*region) == "" {
+			*region = defaults.Region
+		}
+	}
+	endpoint := strings.TrimRight(firstNonEmpty(*idcsEndpoint, *issuer), "/")
+	if endpoint == "" {
+		return fmt.Errorf("--issuer or --idcs-endpoint is required")
+	}
+	principalType, principalID, mechanism := "User", strings.TrimSpace(*userID), planner.AdministratorToUserGrant
+	if strings.TrimSpace(*groupID) != "" {
+		principalType, principalID, mechanism = "Group", strings.TrimSpace(*groupID), planner.AdministratorToGroupGrant
+	}
+	if *currentUser {
+		resolvedUserID, err := currentIdentityDomainUserID(*ociContextBin, *ociContextService, endpoint, *profile, *ociConfigPath, *region)
+		if err != nil {
+			return err
+		}
+		principalID = resolvedUserID
+	}
+	assignment := appRoleAssignment{
+		SchemaVersion: "oci-idm.app-role-assignment.v1", AppID: strings.TrimSpace(*appID), RoleID: strings.TrimSpace(*roleID),
+		PrincipalType: principalType, PrincipalID: principalID, GrantMechanism: mechanism, Status: "planned",
+	}
+	if exists, err := appRoleGrantExists(endpoint, assignment, *profile, *ociConfigPath, *region); err != nil {
+		return err
+	} else if exists {
+		assignment.Status = "already-assigned"
+		return writeAppRoleAssignment(stdout, output, assignment)
+	}
+	if !*confirm {
+		return writeAppRoleAssignment(stdout, output, assignment)
+	}
+	payload := planner.GrantInput{
+		Schemas: []string{planner.GrantSchema}, GrantMechanism: mechanism,
+		App:         planner.ResourceRef{Value: assignment.AppID},
+		Entitlement: planner.EntitlementRef{AttributeName: "appRoles", AttributeValue: assignment.RoleID},
+		Grantee:     planner.ResourceRef{Value: assignment.PrincipalID, Type: assignment.PrincipalType},
+	}
+	appJSON, err := json.Marshal(payload.App)
+	if err != nil {
+		return err
+	}
+	entitlementJSON, err := json.Marshal(payload.Entitlement)
+	if err != nil {
+		return err
+	}
+	granteeJSON, err := json.Marshal(payload.Grantee)
+	if err != nil {
+		return err
+	}
+	commandArgs := []string{"identity-domains", "grant", "create", "--endpoint", endpoint, "--schemas", `["` + planner.GrantSchema + `"]`, "--grant-mechanism", mechanism, "--app", string(appJSON), "--entitlement", string(entitlementJSON), "--grantee", string(granteeJSON)}
+	if strings.TrimSpace(*profile) != "" {
+		commandArgs = append(commandArgs, "--profile", *profile)
+	}
+	if strings.TrimSpace(*ociConfigPath) != "" {
+		commandArgs = append(commandArgs, "--config-file", *ociConfigPath)
+	}
+	if strings.TrimSpace(*region) != "" {
+		commandArgs = append(commandArgs, "--region", *region)
+	}
+	if _, err := runCommand("oci", commandArgs...); err != nil {
+		return fmt.Errorf("assign app role: %w", err)
+	}
+	if exists, err := appRoleGrantExists(endpoint, assignment, *profile, *ociConfigPath, *region); err != nil {
+		return err
+	} else if !exists {
+		return fmt.Errorf("app-role assignment completed but could not be verified")
+	}
+	assignment.Status, assignment.Executed = "assigned", true
+	return writeAppRoleAssignment(stdout, output, assignment)
+}
+
+func currentIdentityDomainUserID(ociContextBin string, service string, endpoint string, profile string, ociConfigPath string, region string) (string, error) {
+	data, err := runCommand(ociContextBin, "auth", "subject", "--service", service, "--require-issuer", endpoint)
+	if err != nil {
+		return "", fmt.Errorf("read current oci-context subject: %w", err)
+	}
+	var subject struct {
+		Issuer     string `json:"issuer"`
+		Subject    string `json:"subject"`
+		NotExpired bool   `json:"not_expired"`
+	}
+	if err := json.Unmarshal(data, &subject); err != nil {
+		return "", fmt.Errorf("decode current oci-context subject: %w", err)
+	}
+	if !subject.NotExpired || strings.TrimRight(subject.Issuer, "/") != endpoint || strings.TrimSpace(subject.Subject) == "" {
+		return "", fmt.Errorf("current oci-context subject is not valid for %s", endpoint)
+	}
+	args := []string{"identity-domains", "users", "search", "--endpoint", endpoint, "--schemas", `["urn:ietf:params:scim:api:messages:2.0:SearchRequest"]`, "--filter", `id eq "` + subject.Subject + `"`, "--attributes", `["id"]`, "--count", "2"}
+	if strings.TrimSpace(profile) != "" {
+		args = append(args, "--profile", profile)
+	}
+	if strings.TrimSpace(ociConfigPath) != "" {
+		args = append(args, "--config-file", ociConfigPath)
+	}
+	if strings.TrimSpace(region) != "" {
+		args = append(args, "--region", region)
+	}
+	data, err = runCommand("oci", args...)
+	if err != nil {
+		return "", fmt.Errorf("resolve current Identity Domains user: %w", err)
+	}
+	var response struct {
+		Resources []struct {
+			ID string `json:"id"`
+		} `json:"Resources"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return "", fmt.Errorf("decode current Identity Domains user: %w", err)
+	}
+	if len(response.Resources) != 1 || strings.TrimSpace(response.Resources[0].ID) == "" {
+		return "", fmt.Errorf("current oci-context subject did not resolve to exactly one Identity Domains user")
+	}
+	return response.Resources[0].ID, nil
+}
+
+func appRoleGrantExists(endpoint string, assignment appRoleAssignment, profile string, ociConfigPath string, region string) (bool, error) {
+	args := []string{"identity-domains", "grants", "search", "--endpoint", endpoint, "--schemas", `["urn:ietf:params:scim:api:messages:2.0:SearchRequest"]`, "--filter", `grantee.value eq "` + assignment.PrincipalID + `" and entitlement.attributeValue eq "` + assignment.RoleID + `" and app.value eq "` + assignment.AppID + `" and grantMechanism eq "` + assignment.GrantMechanism + `"`, "--attributes", `["id"]`, "--count", "1"}
+	if strings.TrimSpace(profile) != "" {
+		args = append(args, "--profile", profile)
+	}
+	if strings.TrimSpace(ociConfigPath) != "" {
+		args = append(args, "--config-file", ociConfigPath)
+	}
+	if strings.TrimSpace(region) != "" {
+		args = append(args, "--region", region)
+	}
+	data, err := runCommand("oci", args...)
+	if err != nil {
+		return false, fmt.Errorf("inspect app-role assignment: %w", err)
+	}
+	var response struct {
+		Resources []struct {
+			ID string `json:"id"`
+		} `json:"Resources"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return false, fmt.Errorf("decode app-role assignment search: %w", err)
+	}
+	return len(response.Resources) > 0 && strings.TrimSpace(response.Resources[0].ID) != "", nil
+}
+
+func writeAppRoleAssignment(stdout io.Writer, output string, assignment appRoleAssignment) error {
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "json":
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(assignment)
+	case "text":
+		fmt.Fprintf(stdout, "appId: %s\nroleId: %s\nprincipal: %s %s\nstatus: %s\nexecuted: %t\n", assignment.AppID, assignment.RoleID, assignment.PrincipalType, assignment.PrincipalID, assignment.Status, assignment.Executed)
 		return nil
 	default:
 		return fmt.Errorf("unsupported output %q", output)
@@ -1737,7 +2119,9 @@ Usage:
   %s describe service-app [options]
   %s clone app --flow authorization-code --name hebe-obp-user
   %s patch app --app-id resource-app-id --allow-offline
+  %s assign app-role --app-id app-id --role-id role-id --group-id group-id --confirm
   %s plan apps [options]
+  %s export --shape obpee-cp [options]
   %s plan apps [options] -o oci-context-yaml
   %s plan apps [options] -o ochain-env
   %s diagnose apps [options]
@@ -1745,8 +2129,7 @@ Usage:
   %s materialize plan -f plan.json --out ./idcs-artifacts
   %s handoff -f plan.json --target oci-context -o yaml
   %s handoff -f plan.json --import --out ./idcs-artifacts
-  %s apply plan -f plan.json --out ./idcs-artifacts
-  %s apply plan -f plan.json --execute --confirm
+  %s apply plan -f plan.json --confirm
   %s validate plan -f plan.json
   %s version
 
@@ -1768,6 +2151,12 @@ Plan options:
     read profile, region, config path, current_service, issuer, and scope defaults from current oci-context
   --oci-context-service obp
     token service name for issuer/scope defaults
+  export --shape obpee-cp
+    renders a secret-free Control Plane OIDC payload from --domain, --app, and --policy
+  patch app
+    add --allow-offline, --add-redirect-uri, or --add-grant values with --confirm
+  assign app-role
+    add one User or Group to one app role with --confirm; existing grants are retained
   -o, --output json|text|oci-context-yaml|oci-context-json|commands|ochain-env|ochain-dotenv|ochain-json
 
 Pipe contracts:
@@ -1776,7 +2165,7 @@ Pipe contracts:
   plan apps -o oci-context-yaml can pipe into oci-context service add --set-current
   plan apps -o ochain-env emits OCHAIN_TOKEN_COMMAND
   handoff remains available for saved plan files
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {

@@ -1,0 +1,27 @@
+{
+  "provider": {
+    "providerName": "IDCS_AUTOMATION",
+    "providerType": "<deployed-control-plane-enum>",
+    "scope": "openid profile offline_access",
+    "clientClaimName": "client_name",
+    "clientClaimValue": "<approved-client-claim-value>",
+    "groupsClaimName": "group_roles",
+    "userClaimName": "user_displayname"
+  },
+  "groupMappings": {
+    "bpmAdminGroup": "<control-plane-admin-group>",
+    "walletSuperAdminGroup": "<wallet-super-admin-group>",
+    "instanceAdminGroup": "<instance-admin-group>",
+    "instanceOperatorGroup": "<instance-operator-group>",
+    "instanceApiClientGroup": "<rpc-client-group>",
+    "walletOrgAdminGroup": "<wallet-org-admin-group>",
+    "walletOrgUserGroup": "<wallet-org-user-group>",
+    "daSuperAdminGroup": "<digital-assets-admin-group>",
+    "daTokenAdminGroup": "<digital-assets-token-admin-group>",
+    "daDeployerGroup": "<digital-assets-deployer-group>",
+    "daApproverGroup": "<digital-assets-approver-group>"
+  },
+  "secretRefs": {
+    "providerClientSecret": "secret://obp/idcs/control-plane-client-secret"
+  }
+}
