@@ -166,26 +166,23 @@ oci-idm describe service-app \
 ```
 
 Resource apps can have `allowOffline: false`, which causes Identity Domains to
-reject Authorization Code requests containing `offline_access`. Preview the
-least-privilege SCIM patch, then execute it only after reviewing the app id:
+reject Authorization Code requests containing `offline_access`. Add only the
+missing redirect URI and grant types, alongside offline access when needed:
 
 ```bash
 oci-idm patch app \
   --app-id example-resource-app-id \
-  --allow-offline
-
-oci-idm patch app \
-  --app-id example-resource-app-id \
   --allow-offline \
-  --execute --confirm
+  --add-redirect-uri http://127.0.0.1:8180/callback \
+  --add-grant authorization_code \
+  --add-grant refresh_token \
+  --confirm
 ```
 
 The command reads issuer, OCI profile, config path, and region from the current
-`oci-context` by default. Its preflight reads the live app, returns a no-op when
-refresh is already enabled, and verifies the value after a successful patch.
-It modifies only the resource app's `allowOffline` attribute; client
-applications still need Authorization Code and Refresh Token grants of their
-own.
+`oci-context` by default. It reads the live app, adds no duplicate values, and
+verifies the result after a successful patch. `--execute` remains a no-op
+compatibility flag; `--confirm` is the only mutation gate.
 
 Oracle service apps can protect seeded attributes even when the generic App
 schema describes them as writable. When `isOPCService` is true and
