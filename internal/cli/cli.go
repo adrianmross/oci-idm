@@ -1587,6 +1587,7 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 	roleID := flags.String("role-id", "", "Identity Domains app-role id")
 	userID := flags.String("user-id", "", "Identity Domains user id")
 	groupID := flags.String("group-id", "", "Identity Domains group id")
+	currentUser := flags.Bool("current-user", false, "resolve the current oci-context token subject to an Identity Domains user")
 	issuer := flags.String("issuer", "", "OCI Identity Domains issuer URL")
 	idcsEndpoint := flags.String("idcs-endpoint", "", "OCI Identity Domains base endpoint")
 	profile := flags.String("profile", "", "OCI CLI profile; defaults from current oci-context")
@@ -1607,8 +1608,18 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(*appID) == "" || strings.TrimSpace(*roleID) == "" {
 		return fmt.Errorf("--app-id and --role-id are required")
 	}
-	if (strings.TrimSpace(*userID) == "") == (strings.TrimSpace(*groupID) == "") {
-		return fmt.Errorf("set exactly one of --user-id or --group-id")
+	principalCount := 0
+	if strings.TrimSpace(*userID) != "" {
+		principalCount++
+	}
+	if strings.TrimSpace(*groupID) != "" {
+		principalCount++
+	}
+	if *currentUser {
+		principalCount++
+	}
+	if principalCount != 1 {
+		return fmt.Errorf("set exactly one of --user-id, --group-id, or --current-user")
 	}
 	visited := collectVisitedFlags(flags)
 	if *useOCIContext {
@@ -1633,6 +1644,13 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 	principalType, principalID, mechanism := "User", strings.TrimSpace(*userID), planner.AdministratorToUserGrant
 	if strings.TrimSpace(*groupID) != "" {
 		principalType, principalID, mechanism = "Group", strings.TrimSpace(*groupID), planner.AdministratorToGroupGrant
+	}
+	if *currentUser {
+		resolvedUserID, err := currentIdentityDomainUserID(*ociContextBin, *ociContextService, endpoint, *profile, *ociConfigPath, *region)
+		if err != nil {
+			return err
+		}
+		principalID = resolvedUserID
 	}
 	assignment := appRoleAssignment{
 		SchemaVersion: "oci-idm.app-role-assignment.v1", AppID: strings.TrimSpace(*appID), RoleID: strings.TrimSpace(*roleID),
@@ -1685,6 +1703,50 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 	}
 	assignment.Status, assignment.Executed = "assigned", true
 	return writeAppRoleAssignment(stdout, output, assignment)
+}
+
+func currentIdentityDomainUserID(ociContextBin string, service string, endpoint string, profile string, ociConfigPath string, region string) (string, error) {
+	data, err := runCommand(ociContextBin, "auth", "subject", "--service", service, "--require-issuer", endpoint)
+	if err != nil {
+		return "", fmt.Errorf("read current oci-context subject: %w", err)
+	}
+	var subject struct {
+		Issuer     string `json:"issuer"`
+		Subject    string `json:"subject"`
+		NotExpired bool   `json:"not_expired"`
+	}
+	if err := json.Unmarshal(data, &subject); err != nil {
+		return "", fmt.Errorf("decode current oci-context subject: %w", err)
+	}
+	if !subject.NotExpired || strings.TrimRight(subject.Issuer, "/") != endpoint || strings.TrimSpace(subject.Subject) == "" {
+		return "", fmt.Errorf("current oci-context subject is not valid for %s", endpoint)
+	}
+	args := []string{"identity-domains", "users", "search", "--endpoint", endpoint, "--schemas", `["urn:ietf:params:scim:api:messages:2.0:SearchRequest"]`, "--filter", `id eq "` + subject.Subject + `"`, "--attributes", `["id"]`, "--count", "2"}
+	if strings.TrimSpace(profile) != "" {
+		args = append(args, "--profile", profile)
+	}
+	if strings.TrimSpace(ociConfigPath) != "" {
+		args = append(args, "--config-file", ociConfigPath)
+	}
+	if strings.TrimSpace(region) != "" {
+		args = append(args, "--region", region)
+	}
+	data, err = runCommand("oci", args...)
+	if err != nil {
+		return "", fmt.Errorf("resolve current Identity Domains user: %w", err)
+	}
+	var response struct {
+		Resources []struct {
+			ID string `json:"id"`
+		} `json:"Resources"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return "", fmt.Errorf("decode current Identity Domains user: %w", err)
+	}
+	if len(response.Resources) != 1 || strings.TrimSpace(response.Resources[0].ID) == "" {
+		return "", fmt.Errorf("current oci-context subject did not resolve to exactly one Identity Domains user")
+	}
+	return response.Resources[0].ID, nil
 }
 
 func appRoleGrantExists(endpoint string, assignment appRoleAssignment, profile string, ociConfigPath string, region string) (bool, error) {

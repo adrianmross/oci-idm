@@ -198,10 +198,26 @@ oci-idm assign app-role \
   --confirm
 ```
 
-Use `--user-id` instead of `--group-id` for a direct user grant. IDs are
-intentional: they make the target unambiguous and preserve review boundaries.
-This configures Identity Domain app access only; it does not change Control
-Plane OIDC provider configuration or Kubernetes resources.
+Use `--user-id` instead of `--group-id` for a direct user grant. For the
+person represented by the current `oci-context` token, resolve the exact
+Identity Domains user ID first and keep the assignment target explicit in the
+result:
+
+```bash
+oci-idm assign app-role \
+  --app-id example-web-app-id \
+  --role-id example-web-app-role-id \
+  --current-user \
+  --oci-context-service example-service \
+  --confirm
+```
+
+`--current-user` requires issuer-matched, unexpired subject metadata from
+`oci-context auth subject`, then looks up an exact Identity Domains user ID
+before creating the grant. IDs are intentional: they make the target
+unambiguous and preserve review boundaries. This configures Identity Domain
+app access only; it does not change Control Plane OIDC provider configuration
+or Kubernetes resources.
 
 Oracle service apps can protect seeded attributes even when the generic App
 schema describes them as writable. When `isOPCService` is true and

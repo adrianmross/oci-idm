@@ -611,6 +611,63 @@ func TestAssignAppRoleCreatesMissingGroupGrant(t *testing.T) {
 	}
 }
 
+func TestAssignAppRoleResolvesCurrentUser(t *testing.T) {
+	searches := 0
+	created := false
+	restore := mockRunner(func(name string, commandArgs ...string) ([]byte, error) {
+		joined := strings.Join(commandArgs, " ")
+		if name == "oci-context" {
+			if joined != "auth subject --service obp --require-issuer https://idcs-example.identity.oraclecloud.com" {
+				t.Fatalf("unexpected oci-context command: %s", joined)
+			}
+			return []byte(`{"issuer":"https://idcs-example.identity.oraclecloud.com","subject":"token-subject-id","not_expired":true}`), nil
+		}
+		if name != "oci" {
+			t.Fatalf("unexpected command: %s %v", name, commandArgs)
+		}
+		switch {
+		case strings.Contains(joined, "identity-domains users search"):
+			if !strings.Contains(joined, `id eq "token-subject-id"`) {
+				t.Fatalf("user search omits token subject: %s", joined)
+			}
+			return []byte(`{"Resources":[{"id":"resolved-user-id"}]}`), nil
+		case strings.Contains(joined, "identity-domains grants search"):
+			searches++
+			if searches == 1 {
+				return []byte(`{"Resources":[]}`), nil
+			}
+			return []byte(`{"Resources":[{"id":"grant-id"}]}`), nil
+		case strings.Contains(joined, "identity-domains grant create"):
+			created = true
+			for _, want := range []string{"ADMINISTRATOR_TO_USER", `"type":"User"`, `"value":"resolved-user-id"`} {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("grant create omits %q: %s", want, joined)
+				}
+			}
+			return []byte(`{"id":"grant-id"}`), nil
+		default:
+			return nil, errors.New("unexpected command: " + joined)
+		}
+	})
+	defer restore()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"assign", "app-role", "--app-id", "web-app-id", "--role-id", "role-id", "--current-user",
+		"--issuer", "https://idcs-example.identity.oraclecloud.com", "--oci-context=false", "--confirm",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("assign failed with %d: %s", code, stderr.String())
+	}
+	var assignment appRoleAssignment
+	if err := json.Unmarshal(stdout.Bytes(), &assignment); err != nil {
+		t.Fatal(err)
+	}
+	if !created || searches != 2 || assignment.PrincipalType != "User" || assignment.PrincipalID != "resolved-user-id" {
+		t.Fatalf("unexpected assignment: %+v", assignment)
+	}
+}
+
 func TestDiscoverUsesDefaultOBPTokenService(t *testing.T) {
 	restore := mockOCIContext(t, map[string]string{
 		"export -f json":            `{"name":"oabcs1","profile":"OABCS1","region":"us-sanjose-1"}`,
