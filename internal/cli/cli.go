@@ -108,6 +108,17 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 			return 1
 		}
 		return 0
+	case "assign":
+		commandArgs, err := stripResourceArg(args[1:], "app-role", "app-roles")
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if err := runAssignAppRole(commandArgs, stdout); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	case "defaults", "context":
 		if err := runDefaults(args[1:], stdout); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -1558,6 +1569,164 @@ func writeAppPatchPlan(stdout io.Writer, output string, plan appPatchPlan) error
 	}
 }
 
+type appRoleAssignment struct {
+	SchemaVersion  string `json:"schemaVersion"`
+	AppID          string `json:"appId"`
+	RoleID         string `json:"roleId"`
+	PrincipalType  string `json:"principalType"`
+	PrincipalID    string `json:"principalId"`
+	GrantMechanism string `json:"grantMechanism"`
+	Status         string `json:"status"`
+	Executed       bool   `json:"executed"`
+}
+
+func runAssignAppRole(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("assign app-role", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	appID := flags.String("app-id", "", "Identity Domains resource app id")
+	roleID := flags.String("role-id", "", "Identity Domains app-role id")
+	userID := flags.String("user-id", "", "Identity Domains user id")
+	groupID := flags.String("group-id", "", "Identity Domains group id")
+	issuer := flags.String("issuer", "", "OCI Identity Domains issuer URL")
+	idcsEndpoint := flags.String("idcs-endpoint", "", "OCI Identity Domains base endpoint")
+	profile := flags.String("profile", "", "OCI CLI profile; defaults from current oci-context")
+	ociConfigPath := flags.String("oci-config-file", "", "OCI CLI config file; defaults from current oci-context")
+	region := flags.String("region", "", "OCI region; defaults from current oci-context")
+	useOCIContext := flags.Bool("oci-context", true, "read current oci-context defaults for omitted values")
+	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for defaults")
+	ociContextService := flags.String("oci-context-service", string(planner.ServiceOBP), "oci-context token service used for issuer defaults")
+	confirm := flags.Bool("confirm", false, "required before creating an app-role assignment")
+	var output string
+	addOutputFlags(flags, &output, "json", "output format: json or text")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(*appID) == "" || strings.TrimSpace(*roleID) == "" {
+		return fmt.Errorf("--app-id and --role-id are required")
+	}
+	if (strings.TrimSpace(*userID) == "") == (strings.TrimSpace(*groupID) == "") {
+		return fmt.Errorf("set exactly one of --user-id or --group-id")
+	}
+	visited := collectVisitedFlags(flags)
+	if *useOCIContext {
+		defaults := loadOCIContextDefaults(*ociContextBin, *ociContextService)
+		if !explicitFlags(visited, "issuer") && strings.TrimSpace(*issuer) == "" {
+			*issuer = defaults.Issuer
+		}
+		if !explicitFlags(visited, "profile") && strings.TrimSpace(*profile) == "" {
+			*profile = defaults.Profile
+		}
+		if !explicitFlags(visited, "oci-config-file") && strings.TrimSpace(*ociConfigPath) == "" {
+			*ociConfigPath = defaults.OCIConfigPath
+		}
+		if !explicitFlags(visited, "region") && strings.TrimSpace(*region) == "" {
+			*region = defaults.Region
+		}
+	}
+	endpoint := strings.TrimRight(firstNonEmpty(*idcsEndpoint, *issuer), "/")
+	if endpoint == "" {
+		return fmt.Errorf("--issuer or --idcs-endpoint is required")
+	}
+	principalType, principalID, mechanism := "User", strings.TrimSpace(*userID), planner.AdministratorToUserGrant
+	if strings.TrimSpace(*groupID) != "" {
+		principalType, principalID, mechanism = "Group", strings.TrimSpace(*groupID), planner.AdministratorToGroupGrant
+	}
+	assignment := appRoleAssignment{
+		SchemaVersion: "oci-idm.app-role-assignment.v1", AppID: strings.TrimSpace(*appID), RoleID: strings.TrimSpace(*roleID),
+		PrincipalType: principalType, PrincipalID: principalID, GrantMechanism: mechanism, Status: "planned",
+	}
+	if exists, err := appRoleGrantExists(endpoint, assignment, *profile, *ociConfigPath, *region); err != nil {
+		return err
+	} else if exists {
+		assignment.Status = "already-assigned"
+		return writeAppRoleAssignment(stdout, output, assignment)
+	}
+	if !*confirm {
+		return fmt.Errorf("--confirm is required to create an app-role assignment")
+	}
+	payload := planner.GrantInput{
+		Schemas: []string{planner.GrantSchema}, GrantMechanism: mechanism,
+		App:         planner.ResourceRef{Value: assignment.AppID},
+		Entitlement: planner.EntitlementRef{AttributeName: "appRoles", AttributeValue: assignment.RoleID},
+		Grantee:     planner.ResourceRef{Value: assignment.PrincipalID, Type: assignment.PrincipalType},
+	}
+	appJSON, err := json.Marshal(payload.App)
+	if err != nil {
+		return err
+	}
+	entitlementJSON, err := json.Marshal(payload.Entitlement)
+	if err != nil {
+		return err
+	}
+	granteeJSON, err := json.Marshal(payload.Grantee)
+	if err != nil {
+		return err
+	}
+	commandArgs := []string{"identity-domains", "grant", "create", "--endpoint", endpoint, "--schemas", `["` + planner.GrantSchema + `"]`, "--grant-mechanism", mechanism, "--app", string(appJSON), "--entitlement", string(entitlementJSON), "--grantee", string(granteeJSON)}
+	if strings.TrimSpace(*profile) != "" {
+		commandArgs = append(commandArgs, "--profile", *profile)
+	}
+	if strings.TrimSpace(*ociConfigPath) != "" {
+		commandArgs = append(commandArgs, "--config-file", *ociConfigPath)
+	}
+	if strings.TrimSpace(*region) != "" {
+		commandArgs = append(commandArgs, "--region", *region)
+	}
+	if _, err := runCommand("oci", commandArgs...); err != nil {
+		return fmt.Errorf("assign app role: %w", err)
+	}
+	if exists, err := appRoleGrantExists(endpoint, assignment, *profile, *ociConfigPath, *region); err != nil {
+		return err
+	} else if !exists {
+		return fmt.Errorf("app-role assignment completed but could not be verified")
+	}
+	assignment.Status, assignment.Executed = "assigned", true
+	return writeAppRoleAssignment(stdout, output, assignment)
+}
+
+func appRoleGrantExists(endpoint string, assignment appRoleAssignment, profile string, ociConfigPath string, region string) (bool, error) {
+	args := []string{"identity-domains", "grants", "search", "--endpoint", endpoint, "--schemas", `["urn:ietf:params:scim:api:messages:2.0:SearchRequest"]`, "--filter", `grantee.value eq "` + assignment.PrincipalID + `" and entitlement.attributeValue eq "` + assignment.RoleID + `" and app.value eq "` + assignment.AppID + `" and grantMechanism eq "` + assignment.GrantMechanism + `"`, "--attributes", `["id"]`, "--count", "1"}
+	if strings.TrimSpace(profile) != "" {
+		args = append(args, "--profile", profile)
+	}
+	if strings.TrimSpace(ociConfigPath) != "" {
+		args = append(args, "--config-file", ociConfigPath)
+	}
+	if strings.TrimSpace(region) != "" {
+		args = append(args, "--region", region)
+	}
+	data, err := runCommand("oci", args...)
+	if err != nil {
+		return false, fmt.Errorf("inspect app-role assignment: %w", err)
+	}
+	var response struct {
+		Resources []struct {
+			ID string `json:"id"`
+		} `json:"Resources"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return false, fmt.Errorf("decode app-role assignment search: %w", err)
+	}
+	return len(response.Resources) > 0 && strings.TrimSpace(response.Resources[0].ID) != "", nil
+}
+
+func writeAppRoleAssignment(stdout io.Writer, output string, assignment appRoleAssignment) error {
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "json":
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(assignment)
+	case "text":
+		fmt.Fprintf(stdout, "appId: %s\nroleId: %s\nprincipal: %s %s\nstatus: %s\nexecuted: %t\n", assignment.AppID, assignment.RoleID, assignment.PrincipalType, assignment.PrincipalID, assignment.Status, assignment.Executed)
+		return nil
+	default:
+		return fmt.Errorf("unsupported output %q", output)
+	}
+}
+
 func runDiagnose(args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("diagnose", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -1887,6 +2056,7 @@ Usage:
   %s describe service-app [options]
   %s clone app --flow authorization-code --name hebe-obp-user
   %s patch app --app-id resource-app-id --allow-offline
+  %s assign app-role --app-id app-id --role-id role-id --group-id group-id --confirm
   %s plan apps [options]
   %s export --shape obpee-cp [options]
   %s plan apps [options] -o oci-context-yaml
@@ -1922,6 +2092,8 @@ Plan options:
     renders a secret-free Control Plane OIDC payload from --domain, --app, and --policy
   patch app
     add --allow-offline, --add-redirect-uri, or --add-grant values with --confirm
+  assign app-role
+    add one User or Group to one app role with --confirm; existing grants are retained
   -o, --output json|text|oci-context-yaml|oci-context-json|commands|ochain-env|ochain-dotenv|ochain-json
 
 Pipe contracts:
@@ -1930,7 +2102,7 @@ Pipe contracts:
   plan apps -o oci-context-yaml can pipe into oci-context service add --set-current
   plan apps -o ochain-env emits OCHAIN_TOKEN_COMMAND
   handoff remains available for saved plan files
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {

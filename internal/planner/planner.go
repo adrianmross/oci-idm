@@ -25,6 +25,7 @@ const (
 	PatchOpSchema                              = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
 	AdministratorToAppGrant                    = "ADMINISTRATOR_TO_APP"
 	AdministratorToUserGrant                   = "ADMINISTRATOR_TO_USER"
+	AdministratorToGroupGrant                  = "ADMINISTRATOR_TO_GROUP"
 	ServiceGeneric               ServiceKind   = "generic"
 	ServiceOBP                   ServiceKind   = "obp"
 	AppUser                      AppKind       = "user"

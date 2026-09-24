@@ -184,6 +184,25 @@ The command reads issuer, OCI profile, config path, and region from the current
 verifies the result after a successful patch. `--execute` remains a no-op
 compatibility flag; `--confirm` is the only mutation gate.
 
+## Web-app role assignments
+
+Assign an approved Identity Domains user or group to an application role without
+maintaining a separate desired-state file. The command searches for the exact
+grant first, creates it only if missing, and verifies it afterward:
+
+```bash
+oci-idm assign app-role \
+  --app-id example-web-app-id \
+  --role-id example-web-app-role-id \
+  --group-id approved-web-app-group-id \
+  --confirm
+```
+
+Use `--user-id` instead of `--group-id` for a direct user grant. IDs are
+intentional: they make the target unambiguous and preserve review boundaries.
+This configures Identity Domain app access only; it does not change Control
+Plane OIDC provider configuration or Kubernetes resources.
+
 Oracle service apps can protect seeded attributes even when the generic App
 schema describes them as writable. When `isOPCService` is true and
 `editableAttributes` does not contain `allowOffline`, `oci-idm` refuses the

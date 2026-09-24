@@ -565,6 +565,52 @@ func TestPatchAppOfflineAccessRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestAssignAppRoleCreatesMissingGroupGrant(t *testing.T) {
+	searches := 0
+	created := false
+	restore := mockRunner(func(name string, commandArgs ...string) ([]byte, error) {
+		joined := strings.Join(commandArgs, " ")
+		if name != "oci" {
+			t.Fatalf("unexpected command: %s %v", name, commandArgs)
+		}
+		switch {
+		case strings.Contains(joined, "identity-domains grants search"):
+			searches++
+			if searches == 1 {
+				return []byte(`{"Resources":[]}`), nil
+			}
+			return []byte(`{"Resources":[{"id":"grant-id"}]}`), nil
+		case strings.Contains(joined, "identity-domains grant create"):
+			created = true
+			for _, want := range []string{"ADMINISTRATOR_TO_GROUP", `"value":"web-app-id"`, `"attributeValue":"role-id"`, `"type":"Group"`, `"value":"group-id"`} {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("grant create omits %q: %s", want, joined)
+				}
+			}
+			return []byte(`{"id":"grant-id"}`), nil
+		default:
+			return nil, errors.New("unexpected command: " + joined)
+		}
+	})
+	defer restore()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"assign", "app-role", "--app-id", "web-app-id", "--role-id", "role-id", "--group-id", "group-id",
+		"--issuer", "https://idcs-example.identity.oraclecloud.com", "--oci-context=false", "--confirm",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("assign failed with %d: %s", code, stderr.String())
+	}
+	var assignment appRoleAssignment
+	if err := json.Unmarshal(stdout.Bytes(), &assignment); err != nil {
+		t.Fatal(err)
+	}
+	if !created || searches != 2 || assignment.Status != "assigned" || !assignment.Executed || assignment.PrincipalType != "Group" {
+		t.Fatalf("unexpected assignment: %+v", assignment)
+	}
+}
+
 func TestDiscoverUsesDefaultOBPTokenService(t *testing.T) {
 	restore := mockOCIContext(t, map[string]string{
 		"export -f json":            `{"name":"oabcs1","profile":"OABCS1","region":"us-sanjose-1"}`,
