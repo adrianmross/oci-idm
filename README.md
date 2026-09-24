@@ -207,17 +207,21 @@ result:
 oci-idm assign app-role \
   --app-id example-web-app-id \
   --role-id example-web-app-role-id \
-  --current-user \
+  --me \
   --oci-context-service example-service \
   --confirm
 ```
 
-`--current-user` requires issuer-matched, unexpired subject metadata from
+`--me` is an alias for `--current-user`. It requires issuer-matched, unexpired subject metadata from
 `oci-context auth subject`, then looks up an exact Identity Domains user ID
 before creating the grant. IDs are intentional: they make the target
 unambiguous and preserve review boundaries. This configures Identity Domain
 app access only; it does not change Control Plane OIDC provider configuration
 or Kubernetes resources.
+
+Omit `--confirm` to inspect the same exact grant first. The command returns
+`already-assigned` when present or a non-mutating `planned` result when the
+grant is missing; add `--confirm` only to create it.
 
 Oracle service apps can protect seeded attributes even when the generic App
 schema describes them as writable. When `isOPCService` is true and

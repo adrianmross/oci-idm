@@ -611,6 +611,32 @@ func TestAssignAppRoleCreatesMissingGroupGrant(t *testing.T) {
 	}
 }
 
+func TestAssignAppRoleWithoutConfirmationPrintsPlan(t *testing.T) {
+	restore := mockRunner(func(name string, commandArgs ...string) ([]byte, error) {
+		if name != "oci" || !strings.Contains(strings.Join(commandArgs, " "), "identity-domains grants search") {
+			t.Fatalf("unexpected command: %s %v", name, commandArgs)
+		}
+		return []byte(`{"Resources":[]}`), nil
+	})
+	defer restore()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"assign", "app-role", "--app-id", "web-app-id", "--role-id", "role-id", "--group-id", "group-id",
+		"--issuer", "https://idcs-example.identity.oraclecloud.com", "--oci-context=false",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("plan failed with %d: %s", code, stderr.String())
+	}
+	var assignment appRoleAssignment
+	if err := json.Unmarshal(stdout.Bytes(), &assignment); err != nil {
+		t.Fatal(err)
+	}
+	if assignment.Status != "planned" || assignment.Executed {
+		t.Fatalf("expected non-mutating plan, got %+v", assignment)
+	}
+}
+
 func TestAssignAppRoleResolvesCurrentUser(t *testing.T) {
 	searches := 0
 	created := false
@@ -653,7 +679,7 @@ func TestAssignAppRoleResolvesCurrentUser(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
-		"assign", "app-role", "--app-id", "web-app-id", "--role-id", "role-id", "--current-user",
+		"assign", "app-role", "--app-id", "web-app-id", "--role-id", "role-id", "--me",
 		"--issuer", "https://idcs-example.identity.oraclecloud.com", "--oci-context=false", "--confirm",
 	}, &stdout, &stderr)
 	if code != 0 {

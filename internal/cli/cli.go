@@ -1588,6 +1588,7 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 	userID := flags.String("user-id", "", "Identity Domains user id")
 	groupID := flags.String("group-id", "", "Identity Domains group id")
 	currentUser := flags.Bool("current-user", false, "resolve the current oci-context token subject to an Identity Domains user")
+	flags.BoolVar(currentUser, "me", false, "alias for --current-user")
 	issuer := flags.String("issuer", "", "OCI Identity Domains issuer URL")
 	idcsEndpoint := flags.String("idcs-endpoint", "", "OCI Identity Domains base endpoint")
 	profile := flags.String("profile", "", "OCI CLI profile; defaults from current oci-context")
@@ -1663,7 +1664,7 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 		return writeAppRoleAssignment(stdout, output, assignment)
 	}
 	if !*confirm {
-		return fmt.Errorf("--confirm is required to create an app-role assignment")
+		return writeAppRoleAssignment(stdout, output, assignment)
 	}
 	payload := planner.GrantInput{
 		Schemas: []string{planner.GrantSchema}, GrantMechanism: mechanism,
