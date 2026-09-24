@@ -440,24 +440,9 @@ func TestPatchAppOfflineAccessPlansAndExecutesGuardedSCIMPatch(t *testing.T) {
 		"--profile", "OABCS1",
 		"--region", "us-sanjose-1",
 		"--oci-context=false",
-		"--preflight=false",
 	}
-	code := Run(args, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("patch plan failed with %d: %s", code, stderr.String())
-	}
-	var plan appPatchPlan
-	if err := json.Unmarshal(stdout.Bytes(), &plan); err != nil {
-		t.Fatalf("decode patch plan: %v", err)
-	}
-	if plan.Executed || !plan.AllowOffline || plan.Command != "oci" {
-		t.Fatalf("unexpected patch plan: %+v", plan)
-	}
-	if !strings.Contains(strings.Join(plan.Args, " "), "allowOffline") {
-		t.Fatalf("patch args omit allowOffline: %v", plan.Args)
-	}
-
 	called := false
+	gets := 0
 	restore := mockRunner(func(name string, commandArgs ...string) ([]byte, error) {
 		joined := strings.Join(commandArgs, " ")
 		if name != "oci" {
@@ -468,20 +453,68 @@ func TestPatchAppOfflineAccessPlansAndExecutesGuardedSCIMPatch(t *testing.T) {
 			return []byte(`{"data":{"allow-offline":true}}`), nil
 		}
 		if strings.Contains(joined, "identity-domains app get") {
+			gets++
+			if gets <= 2 {
+				return []byte(`{"data":{"id":"resource-app-id","allow-offline":false}}`), nil
+			}
 			return []byte(`{"data":{"id":"resource-app-id","allow-offline":true}}`), nil
 		}
 		t.Fatalf("unexpected OCI command: %v", commandArgs)
 		return nil, nil
 	})
 	defer restore()
+	code := Run(args, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "--confirm is required") {
+		t.Fatalf("expected confirmation failure, code=%d stderr=%s", code, stderr.String())
+	}
 	stdout.Reset()
 	stderr.Reset()
-	code = Run(append(args, "--execute", "--confirm"), &stdout, &stderr)
+	code = Run(append(args, "--confirm"), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("patch execute failed with %d: %s", code, stderr.String())
 	}
 	if !called {
 		t.Fatal("expected OCI patch command")
+	}
+}
+
+func TestPatchAppAddsMissingRedirectAndGrant(t *testing.T) {
+	gets := 0
+	patched := false
+	restore := mockRunner(func(name string, commandArgs ...string) ([]byte, error) {
+		joined := strings.Join(commandArgs, " ")
+		if name != "oci" {
+			t.Fatalf("unexpected command: %s %v", name, commandArgs)
+		}
+		switch {
+		case strings.Contains(joined, "identity-domains app patch"):
+			patched = true
+			for _, want := range []string{"https://new.example/callback", "refresh_token"} {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("patch omits %q: %s", want, joined)
+				}
+			}
+			return []byte(`{"data":{}}`), nil
+		case strings.Contains(joined, "identity-domains app get"):
+			gets++
+			if gets == 1 {
+				return []byte(`{"data":{"id":"resource-app-id","redirect-uris":["https://old.example/callback"],"allowed-grants":["authorization_code"]}}`), nil
+			}
+			return []byte(`{"data":{"id":"resource-app-id","redirect-uris":["https://old.example/callback","https://new.example/callback"],"allowed-grants":["authorization_code","refresh_token"]}}`), nil
+		default:
+			return nil, errors.New("unexpected command: " + joined)
+		}
+	})
+	defer restore()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"patch", "app", "--app-id", "resource-app-id",
+		"--add-redirect-uri", "https://new.example/callback", "--add-grant", "refresh_token",
+		"--issuer", "https://idcs-example.identity.oraclecloud.com", "--oci-context=false", "--confirm",
+	}, &stdout, &stderr)
+	if code != 0 || !patched || gets != 2 {
+		t.Fatalf("patch failed: code=%d patched=%t gets=%d stderr=%s", code, patched, gets, stderr.String())
 	}
 }
 
@@ -544,12 +577,19 @@ func TestPatchAppOfflineAccessReturnsNoopWhenAlreadyEnabled(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &plan); err != nil {
 		t.Fatal(err)
 	}
-	if plan.Status != "already-enabled" || plan.Executed || plan.CurrentAllowOffline == nil || !*plan.CurrentAllowOffline {
+	if plan.Status != "already-configured" || plan.Executed || plan.CurrentAllowOffline == nil || !*plan.CurrentAllowOffline {
 		t.Fatalf("unexpected no-op plan: %+v", plan)
 	}
 }
 
 func TestPatchAppOfflineAccessRequiresConfirmation(t *testing.T) {
+	restore := mockRunner(func(name string, commandArgs ...string) ([]byte, error) {
+		if name != "oci" || !strings.Contains(strings.Join(commandArgs, " "), "identity-domains app get") {
+			t.Fatalf("unexpected command: %s %v", name, commandArgs)
+		}
+		return []byte(`{"data":{"id":"resource-app-id","allow-offline":false}}`), nil
+	})
+	defer restore()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
@@ -558,9 +598,8 @@ func TestPatchAppOfflineAccessRequiresConfirmation(t *testing.T) {
 		"--allow-offline",
 		"--issuer", "https://idcs-example.identity.oraclecloud.com",
 		"--oci-context=false",
-		"--execute",
 	}, &stdout, &stderr)
-	if code == 0 || !strings.Contains(stderr.String(), "--execute requires --confirm") {
+	if code == 0 || !strings.Contains(stderr.String(), "--confirm is required") {
 		t.Fatalf("expected confirmation failure, code=%d stderr=%s", code, stderr.String())
 	}
 }
