@@ -1,0 +1,12 @@
+{
+  "apiVersion": "oci-idm.oracle.com/v1",
+  "kind": "IdentityDomainAppsPlanConfig",
+  "spec": {
+    "service": "obp",
+    "resourceAppId": "<resource-app-id>",
+    "appPrefix": "<app-prefix>",
+    "include": "user,service,jwt",
+    "rolePreset": "obp-rest-client",
+    "principalMode": "auto"
+  }
+}

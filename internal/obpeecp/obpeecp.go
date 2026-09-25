@@ -8,6 +8,11 @@ import (
 
 const SchemaVersion = "oci-idm.obpee-cp.v1"
 
+const (
+	APIVersion = "oci-idm.oracle.com/v1"
+	Kind       = "OBPEEControlPlaneOIDCExport"
+)
+
 type Policy struct {
 	Provider      Provider   `json:"provider"`
 	GroupMappings Mappings   `json:"groupMappings"`
@@ -60,6 +65,8 @@ type Input struct {
 }
 
 type Document struct {
+	APIVersion     string     `json:"apiVersion,omitempty"`
+	Kind           string     `json:"kind,omitempty"`
 	SchemaVersion  string     `json:"schemaVersion"`
 	Target         Target     `json:"target"`
 	IdentityDomain Domain     `json:"identityDomain"`
@@ -169,6 +176,8 @@ func Build(input Input) (Document, error) {
 	}
 	wellKnownURI := issuer + "/.well-known/openid-configuration"
 	return Document{
+		APIVersion:     APIVersion,
+		Kind:           Kind,
 		SchemaVersion:  SchemaVersion,
 		Target:         Target{ControlPlaneURL: controlPlaneURL, RedirectURI: redirectURI},
 		IdentityDomain: Domain{Issuer: issuer, WellKnownURI: wellKnownURI, ApplicationID: strings.TrimSpace(input.App)},

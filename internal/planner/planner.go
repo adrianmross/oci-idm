@@ -10,6 +10,8 @@ import (
 
 const (
 	SchemaVersion                              = "oci-idm.plan.v1"
+	APIVersion                                 = "oci-idm.oracle.com/v1"
+	AppsPlanKind                               = "IdentityDomainAppsPlan"
 	IDCSAppSchema                              = "urn:ietf:params:scim:schemas:oracle:idcs:App"
 	IDCSUserSchema                             = "urn:ietf:params:scim:schemas:core:2.0:User"
 	DefaultWebAppTemplateID                    = "CustomWebAppTemplateId"
@@ -85,6 +87,8 @@ type Options struct {
 }
 
 type Plan struct {
+	APIVersion          string              `json:"apiVersion,omitempty"`
+	Kind                string              `json:"kind,omitempty"`
 	SchemaVersion       string              `json:"schemaVersion"`
 	Target              Target              `json:"target"`
 	BaseCloudServiceApp BaseCloudServiceApp `json:"baseCloudServiceApp,omitempty"`
@@ -92,6 +96,18 @@ type Plan struct {
 	Apply               ApplyPlan           `json:"apply"`
 	Validation          ValidationPlan      `json:"validation"`
 	SourceReferences    []string            `json:"sourceReferences"`
+	InputSources        map[string]string   `json:"inputSources,omitempty"`
+}
+
+// ValidateContract accepts legacy plans that predate apiVersion and kind.
+func (plan Plan) ValidateContract() error {
+	if plan.APIVersion != "" && plan.APIVersion != APIVersion {
+		return fmt.Errorf("unsupported apps plan apiVersion %q", plan.APIVersion)
+	}
+	if plan.Kind != "" && plan.Kind != AppsPlanKind {
+		return fmt.Errorf("unsupported apps plan kind %q", plan.Kind)
+	}
+	return nil
 }
 
 type Target struct {
@@ -365,6 +381,8 @@ func Build(options Options) (Plan, error) {
 	}
 
 	return Plan{
+		APIVersion:    APIVersion,
+		Kind:          AppsPlanKind,
 		SchemaVersion: SchemaVersion,
 		Target: Target{
 			Service:              service,

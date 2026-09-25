@@ -417,6 +417,8 @@ func commandString(name string, args ...string) string {
 const domainPlanSchemaVersion = "oci-idm.domain-plan.v1"
 
 type domainCreatePlan struct {
+	APIVersion          string `json:"apiVersion,omitempty"`
+	Kind                string `json:"kind,omitempty"`
 	SchemaVersion       string `json:"schemaVersion"`
 	ContextName         string `json:"contextName,omitempty"`
 	CompartmentOCID     string `json:"compartmentOcid"`
@@ -489,7 +491,7 @@ func runPlanDomain(args []string, stdout io.Writer) error {
 		return fmt.Errorf("--max-wait-seconds and --wait-interval-seconds must be positive")
 	}
 	plan := domainCreatePlan{
-		SchemaVersion: domainPlanSchemaVersion, ContextName: defaults.ContextName,
+		APIVersion: planner.APIVersion, Kind: "IdentityDomainPlan", SchemaVersion: domainPlanSchemaVersion, ContextName: defaults.ContextName,
 		CompartmentOCID: *compartmentID, DisplayName: displayName, Description: *description,
 		HomeRegion: *homeRegion, LicenseType: *licenseType, Profile: *profile,
 		OCIConfigPath: *ociConfigPath, Region: *region, MaxWaitSeconds: *maxWaitSeconds,
@@ -618,6 +620,12 @@ func readDomainPlan(path string) (domainCreatePlan, error) {
 	}
 	if plan.SchemaVersion != domainPlanSchemaVersion {
 		return domainCreatePlan{}, fmt.Errorf("unsupported domain plan schema %q", plan.SchemaVersion)
+	}
+	if plan.APIVersion != "" && plan.APIVersion != planner.APIVersion {
+		return domainCreatePlan{}, fmt.Errorf("unsupported domain plan apiVersion %q", plan.APIVersion)
+	}
+	if plan.Kind != "" && plan.Kind != "IdentityDomainPlan" {
+		return domainCreatePlan{}, fmt.Errorf("unsupported domain plan kind %q", plan.Kind)
 	}
 	if plan.DisplayName == "" || plan.Description == "" || plan.HomeRegion == "" || plan.LicenseType == "" || plan.CompartmentOCID == "" || plan.MaxWaitSeconds <= 0 || plan.WaitIntervalSeconds <= 0 {
 		return domainCreatePlan{}, fmt.Errorf("domain plan is incomplete")
@@ -856,6 +864,8 @@ func runPlan(args []string, stdout io.Writer) error {
 	useOCIContext := flags.Bool("oci-context", true, "read current oci-context and token-service defaults for omitted values")
 	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for defaults")
 	ociContextService := flags.String("oci-context-service", "", "oci-context token service used for issuer/scope defaults; defaults to --service for non-generic services")
+	planConfigPath := flags.String("plan-config", "", "path to an API-versioned JSON apps plan config")
+	preset := flags.String("preset", "", "apps plan preset: ocix-local")
 	var output string
 	addOutputFlags(flags, &output, "json", "output format: json, text, oci-context-yaml, oci-context-json, commands, ochain-env, ochain-dotenv, or ochain-json")
 	tokenService := flags.String("token-service", "", "token service name for OChain output")
@@ -866,6 +876,24 @@ func runPlan(args []string, stdout io.Writer) error {
 	if flags.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
+
+	visited := collectVisitedFlags(flags)
+	sources := map[string]string{}
+	markExplicitAppsPlanInputs(visited, sources)
+	values := appsPlanFlagValues{
+		Service: service, Platform: platform, Issuer: issuer, Scope: scope, IDCSEndpoint: idcsEndpoint,
+		ResourceAppID: resourceAppID, AppPrefix: appPrefix, RedirectURL: redirectURL, Include: include,
+		UserClientType: userClientType, PrincipalMode: principalMode, PrincipalEmailDomain: principalEmailDomain,
+		RolePreset: rolePreset, AppRoleGrants: appRoleGrants, TokenService: tokenService,
+	}
+	if err := values.applyPreset(*preset, visited, sources); err != nil {
+		return err
+	}
+	planConfig, err := readAppsPlanConfig(*planConfigPath)
+	if err != nil {
+		return err
+	}
+	values.applyConfig(planConfig.Spec, visited, sources)
 
 	includes, err := planner.ParseIncludes(*include)
 	if err != nil {
@@ -887,7 +915,6 @@ func runPlan(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	visited := collectVisitedFlags(flags)
 	contextName := ""
 	if *useOCIContext {
 		serviceName := firstNonEmpty(*ociContextService, defaultOCIContextServiceName(*service))
@@ -895,24 +922,30 @@ func runPlan(args []string, stdout io.Writer) error {
 		contextName = defaults.ContextName
 		if !explicitFlags(visited, "issuer") && strings.TrimSpace(*issuer) == "" {
 			*issuer = defaults.Issuer
+			sources["issuer"] = "ocix-context"
 		}
 		if !explicitFlags(visited, "scope") && strings.TrimSpace(*scope) == "" {
 			*scope = defaults.Scope
+			sources["scope"] = "ocix-context"
 		}
 		if !explicitFlags(visited, "service") && strings.TrimSpace(*service) == "" {
 			*service = string(inferServiceKind(defaults, planner.ServiceGeneric))
+			sources["service"] = "ocix-context"
 		}
 		if !explicitFlags(visited, "platform") && strings.TrimSpace(*platform) == "" && planner.ServiceKind(*service) == planner.ServiceOBP {
 			*platform = defaults.Scope
+			sources["platform"] = "ocix-context"
 		}
 		if !explicitFlags(visited, "profile") && strings.TrimSpace(*profile) == "" {
 			*profile = defaults.Profile
+			sources["ociProfile"] = "ocix-context"
 		}
 		if !explicitFlags(visited, "oci-config-file") && strings.TrimSpace(*ociConfigPath) == "" {
 			*ociConfigPath = defaults.OCIConfigPath
 		}
 		if !explicitFlags(visited, "region") && strings.TrimSpace(*region) == "" {
 			*region = defaults.Region
+			sources["ociRegion"] = "ocix-context"
 		}
 	}
 	plan, err := planner.Build(planner.Options{
@@ -947,6 +980,7 @@ func runPlan(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	plan.InputSources = sources
 
 	return printPlanOutput(stdout, plan, output, *tokenService)
 }
@@ -954,20 +988,32 @@ func runPlan(args []string, stdout io.Writer) error {
 func runExport(args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("export", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	var planPath string
+	var output string
 	domain := flags.String("domain", "", "Identity Domains issuer URL")
 	app := flags.String("app", "", "Identity Domains OAuth client ID")
 	controlPlaneURL := flags.String("control-plane-url", "", "Control Plane base URL")
 	redirectURI := flags.String("redirect-uri", "", "Control Plane OAuth callback URL; defaults from --control-plane-url")
 	policyPath := flags.String("policy", "", "path to secret-free OBPEE Control Plane policy JSON")
-	shape := flags.String("shape", "", "render target: obpee-cp")
+	shape := flags.String("shape", "", "render target: obpee-cp or oci-context")
+	addFileFlags(flags, &planPath, "path to a JSON plan emitted by oci-idm plan, or - for stdin")
+	addOutputFlags(flags, &output, "json", "output format: json or yaml")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
-	if strings.ToLower(strings.TrimSpace(*shape)) != "obpee-cp" {
-		return fmt.Errorf("--shape obpee-cp is required")
+	switch strings.ToLower(strings.TrimSpace(*shape)) {
+	case "oci-context", "ocix":
+		plan, err := readPlanInput(planPath)
+		if err != nil {
+			return err
+		}
+		return printOCIContextExport(stdout, handoff.ForOCIContext(plan), output)
+	case "obpee-cp":
+	default:
+		return fmt.Errorf("--shape must be obpee-cp or oci-context")
 	}
 	if strings.TrimSpace(*domain) == "" || strings.TrimSpace(*app) == "" || strings.TrimSpace(*controlPlaneURL) == "" || strings.TrimSpace(*policyPath) == "" {
 		return fmt.Errorf("--domain, --app, --control-plane-url, and --policy are required")
@@ -997,6 +1043,23 @@ func runExport(args []string, stdout io.Writer) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(document)
+}
+
+func printOCIContextExport(stdout io.Writer, value handoff.OCIContext, output string) error {
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "", "json":
+		data, err := handoff.JSON(value)
+		if err != nil {
+			return err
+		}
+		_, err = stdout.Write(data)
+		return err
+	case "yaml", "yml":
+		fmt.Fprint(stdout, handoff.TokenServicesYAML(value))
+		return nil
+	default:
+		return fmt.Errorf("unsupported oci-context export output %q", output)
+	}
 }
 
 func readOBPEEPolicy(path string) (obpeecp.Policy, error) {
@@ -1341,6 +1404,8 @@ func runDiscover(args []string, stdout io.Writer) error {
 }
 
 type appPatchPlan struct {
+	APIVersion           string              `json:"apiVersion,omitempty"`
+	Kind                 string              `json:"kind,omitempty"`
 	SchemaVersion        string              `json:"schemaVersion"`
 	AppID                string              `json:"appId"`
 	IDCSEndpoint         string              `json:"idcsEndpoint"`
@@ -1449,6 +1514,8 @@ func runPatchApp(args []string, stdout io.Writer) error {
 	}
 	endpoint = strings.TrimRight(endpoint, "/")
 	plan := appPatchPlan{
+		APIVersion:      planner.APIVersion,
+		Kind:            "IdentityDomainAppPatchPlan",
 		SchemaVersion:   "oci-idm.app-patch.v1",
 		AppID:           *appID,
 		IDCSEndpoint:    endpoint,
@@ -1604,6 +1671,8 @@ func writeAppPatchPlan(stdout io.Writer, output string, plan appPatchPlan) error
 }
 
 type appRoleAssignment struct {
+	APIVersion     string `json:"apiVersion,omitempty"`
+	Kind           string `json:"kind,omitempty"`
 	SchemaVersion  string `json:"schemaVersion"`
 	AppID          string `json:"appId"`
 	RoleID         string `json:"roleId"`
@@ -1689,7 +1758,7 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 		principalID = resolvedUserID
 	}
 	assignment := appRoleAssignment{
-		SchemaVersion: "oci-idm.app-role-assignment.v1", AppID: strings.TrimSpace(*appID), RoleID: strings.TrimSpace(*roleID),
+		APIVersion: planner.APIVersion, Kind: "IdentityDomainAppRoleAssignment", SchemaVersion: "oci-idm.app-role-assignment.v1", AppID: strings.TrimSpace(*appID), RoleID: strings.TrimSpace(*roleID),
 		PrincipalType: principalType, PrincipalID: principalID, GrantMechanism: mechanism, Status: "planned",
 	}
 	if exists, err := appRoleGrantExists(endpoint, assignment, *profile, *ociConfigPath, *region); err != nil {
@@ -2145,7 +2214,23 @@ func readPlanFile(path string) (planner.Plan, error) {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return planner.Plan{}, err
 	}
+	if err := plan.ValidateContract(); err != nil {
+		return planner.Plan{}, err
+	}
 	return plan, nil
+}
+
+func readPlanInput(path string) (planner.Plan, error) {
+	if strings.TrimSpace(path) == "" {
+		if file, ok := stdinReader.(*os.File); ok {
+			stat, err := file.Stat()
+			if err == nil && stat.Mode()&os.ModeCharDevice != 0 {
+				return planner.Plan{}, fmt.Errorf("-f/--file is required unless a plan is piped on stdin")
+			}
+		}
+		path = "-"
+	}
+	return readPlanFile(path)
 }
 
 func writeRootHelp(stdout io.Writer, program string) {
@@ -2165,6 +2250,7 @@ Usage:
   %s create app-role-assignment --app-id app-id --role-id role-id --group-id group-id [--apply]
   %s plan apps [options]
   %s export --shape obpee-cp [options]
+  %s export --shape ocix [--plan plan.json] [-o json|yaml]
   %s plan apps [options] -o oci-context-yaml
   %s plan apps [options] -o ochain-env
   %s diagnose apps [options]
@@ -2196,6 +2282,8 @@ Plan options:
     token service name for issuer/scope defaults
   export --shape obpee-cp
     renders a secret-free Control Plane OIDC payload from --domain, --app, and --policy
+  export --shape ocix [--plan plan.json]
+    renders a secret-free token-service document for oci-context; omitting --plan reads a piped plan
   edit app
     preview --allow-offline, --add-redirect-uri, or --add-grant values; add --apply to write
   create app-role-assignment
@@ -2207,8 +2295,9 @@ Pipe contracts:
   clone app emits JSON that can pipe into oci-context service add --set-current
   plan apps -o oci-context-yaml can pipe into oci-context service add --set-current
   plan apps -o ochain-env emits OCHAIN_TOKEN_COMMAND
-  handoff remains available for saved plan files
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+  export --shape ocix emits JSON on stdout for oci-context service import stdin
+  handoff remains available for older scripts
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {

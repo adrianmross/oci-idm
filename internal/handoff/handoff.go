@@ -10,7 +10,14 @@ import (
 
 const SchemaVersion = "oci-idm.handoff.oci-context.v1"
 
+const (
+	APIVersion      = "oci-idm.oracle.com/v1"
+	OCIContextKind  = "OCIContextTokenServiceExport"
+)
+
 type OCIContext struct {
+	APIVersion      string         `json:"apiVersion,omitempty"`
+	Kind            string         `json:"kind,omitempty"`
 	SchemaVersion  string         `json:"schemaVersion"`
 	CurrentService string         `json:"currentService,omitempty"`
 	TokenServices  []TokenService `json:"tokenServices"`
@@ -52,6 +59,8 @@ type OChain struct {
 
 func ForOCIContext(plan planner.Plan) OCIContext {
 	h := OCIContext{
+		APIVersion:    APIVersion,
+		Kind:          OCIContextKind,
 		SchemaVersion: SchemaVersion,
 		Notes: []string{
 			"Add token_services entries to oci-context config, or use the commands directly for one-off validation.",

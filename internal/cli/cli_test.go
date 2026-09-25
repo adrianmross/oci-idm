@@ -53,6 +53,9 @@ func TestPlanJSON(t *testing.T) {
 	if payload["schemaVersion"] != "oci-idm.plan.v1" {
 		t.Fatalf("unexpected schema version: %#v", payload["schemaVersion"])
 	}
+	if payload["apiVersion"] != "oci-idm.oracle.com/v1" || payload["kind"] != "IdentityDomainAppsPlan" {
+		t.Fatalf("unexpected plan contract: apiVersion=%#v kind=%#v", payload["apiVersion"], payload["kind"])
+	}
 	apps := payload["apps"].([]any)
 	if len(apps) != 2 {
 		t.Fatalf("expected 2 apps, got %d", len(apps))
@@ -90,6 +93,8 @@ func TestExportOBPEECP(t *testing.T) {
 		t.Fatalf("export failed with %d: %s", code, stderr.String())
 	}
 	var output struct {
+		APIVersion    string `json:"apiVersion"`
+		Kind          string `json:"kind"`
 		SchemaVersion string `json:"schemaVersion"`
 		Target        struct {
 			RedirectURI string `json:"redirectUri"`
@@ -103,7 +108,7 @@ func TestExportOBPEECP(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
 		t.Fatalf("invalid export JSON: %v\n%s", err, stdout.String())
 	}
-	if output.SchemaVersion != "oci-idm.obpee-cp.v1" || output.IdentityDomain.Issuer != server.URL || output.IdentityDomain.ApplicationID != "cp-client-id" {
+	if output.APIVersion != "oci-idm.oracle.com/v1" || output.Kind != "OBPEEControlPlaneOIDCExport" || output.SchemaVersion != "oci-idm.obpee-cp.v1" || output.IdentityDomain.Issuer != server.URL || output.IdentityDomain.ApplicationID != "cp-client-id" {
 		t.Fatalf("unexpected export: %+v", output)
 	}
 	if output.Target.RedirectURI != "https://cp.example.test:7443/api/v1/auth/provider/code" || output.Request["providerClientId"] != "cp-client-id" {
@@ -128,6 +133,54 @@ func TestPlanRejectsUnknownInclude(t *testing.T) {
 	}
 	if stderr.Len() == 0 {
 		t.Fatal("expected stderr output")
+	}
+}
+
+func TestPlanConfigPrecedenceAndSources(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "apps-plan.json")
+	config := `{"apiVersion":"oci-idm.oracle.com/v1","kind":"IdentityDomainAppsPlanConfig","spec":{"service":"generic","issuer":"https://idcs-example.identity.oraclecloud.com","scope":"https://service.example.com","appPrefix":"from-config","include":"user","rolePreset":"none"}}`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"plan", "--plan-config", configPath, "--app-prefix", "from-flag", "--oci-context=false"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("plan failed with %d: %s", code, stderr.String())
+	}
+	var payload struct {
+		InputSources map[string]string `json:"inputSources"`
+		Apps         []struct {
+			Name string `json:"name"`
+		} `json:"apps"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.InputSources["issuer"] != "plan-config" || payload.InputSources["include"] != "plan-config" || payload.InputSources["appPrefix"] != "flag" {
+		t.Fatalf("unexpected plan sources: %#v", payload.InputSources)
+	}
+	if len(payload.Apps) != 1 || !strings.HasPrefix(payload.Apps[0].Name, "from-flag-") {
+		t.Fatalf("flag did not override config: %#v", payload.Apps)
+	}
+}
+
+func TestPlanPresetOCIXLocal(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"plan", "--preset", "ocix-local", "--service", "generic", "--issuer", "https://idcs-example.identity.oraclecloud.com", "--scope", "https://service.example.com", "--app-prefix", "example", "--oci-context=false"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("plan failed with %d: %s", code, stderr.String())
+	}
+	var payload struct {
+		InputSources map[string]string `json:"inputSources"`
+		Apps         []any             `json:"apps"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.InputSources["include"] != "preset:ocix-local" || len(payload.Apps) != 1 {
+		t.Fatalf("unexpected ocix-local preset output: %#v", payload)
 	}
 }
 
@@ -1213,6 +1266,36 @@ func TestHandoffReadsPlanFromStdin(t *testing.T) {
 	}
 	if !strings.Contains(handoffOut.String(), "token_services:") || !strings.Contains(handoffOut.String(), "name: 'obp'") {
 		t.Fatalf("unexpected handoff output:\n%s", handoffOut.String())
+	}
+}
+
+func TestExportOCIContextReadsPlanFromStdin(t *testing.T) {
+	var planOut bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"plan",
+		"--service", "obp",
+		"--issuer", "https://idcs-example.identity.oraclecloud.com",
+		"--platform", "https://example-oabcs.blockchain.ocp.oraclecloud.com:7443/restproxy",
+		"--include", "user",
+	}, &planOut, &stderr)
+	if code != 0 {
+		t.Fatalf("plan failed with %d: %s", code, stderr.String())
+	}
+
+	previous := stdinReader
+	stdinReader = bytes.NewReader(planOut.Bytes())
+	defer func() { stdinReader = previous }()
+
+	var output bytes.Buffer
+	code = Run([]string{"export", "--shape", "ocix"}, &output, &stderr)
+	if code != 0 {
+		t.Fatalf("export failed with %d: %s", code, stderr.String())
+	}
+	for _, want := range []string{`"apiVersion": "oci-idm.oracle.com/v1"`, `"kind": "OCIContextTokenServiceExport"`, `"schemaVersion": "oci-idm.handoff.oci-context.v1"`, `"tokenServices"`} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("expected %q in export output:\n%s", want, output.String())
+		}
 	}
 }
 

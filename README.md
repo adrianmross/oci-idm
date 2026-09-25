@@ -76,6 +76,33 @@ The preferred command shape is `oci-idm <verb> <resource> [flags]`, similar to
 `create domain`, `edit app`, `create app-role-assignment`, `clone app`, `plan apps`,
 `doctor plan`, `materialize plan`, `apply plan`, `validate plan`, and `export`.
 
+Machine-readable apps plans and exports include `apiVersion` and `kind` in
+addition to their legacy `schemaVersion`. Readers accept pre-versioned legacy
+documents, but reject an explicit incompatible API contract.
+
+Start from [examples/apps-plan-config.json](examples/apps-plan-config.json) for
+a small, checked-in JSON plan config. Explicit CLI flags win; config values
+override presets and context defaults:
+
+```json
+{
+  "apiVersion": "oci-idm.oracle.com/v1",
+  "kind": "IdentityDomainAppsPlanConfig",
+  "spec": {
+    "appPrefix": "payments",
+    "include": "user",
+    "rolePreset": "obp-rest-client"
+  }
+}
+```
+
+```bash
+oci-idm plan apps --preset ocix-local --plan-config apps-plan.json
+```
+
+The resulting plan records each resolved supplied value in `inputSources` as
+`flag`, `plan-config`, `preset:ocix-local`, or `ocix-context`.
+
 Inspect the resolved defaults before planning:
 
 ```bash
@@ -347,16 +374,20 @@ oci-context auth login
 oci-context auth token --no-login --format raw
 ```
 
-Import generated `oci-context` token services:
+Preview generated `oci-context` token services without writing a handoff file:
 
 ```bash
-oci-idm plan apps --service obp --resource-app-id example-resource-app-id \
-  -o oci-context-yaml |
-  oci-context service add --set-current
+set -o pipefail
+oci-idm plan apps --service obp --resource-app-id example-resource-app-id -o json |
+  oci-idm export --shape ocix |
+  oci-context service import --set-current
+# Review the preview, then repeat with --apply on `service import`.
 ```
 
-Merge the generated `token_services` entries into a global or project
-`oci-context` config, then validate with `oci-context auth token`.
+`export --shape ocix` emits a secret-free document on stdout. `service import`
+detects piped stdin, previews by default, and verifies the saved OAuth contract
+when run with `--apply`. For a saved input, use `--plan idm-plan.json`;
+`oci-context` remains an accepted shape name.
 
 Emit OChain environment data in standard shell, dotenv, or JSON shapes:
 
