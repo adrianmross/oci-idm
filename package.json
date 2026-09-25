@@ -1,6 +1,6 @@
 {
   "name": "@adrianmross/oci-idm",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Plan OCI Identity Domains apps, grants, and token-helper handoffs",
   "license": "MIT",
   "homepage": "https://github.com/adrianmross/oci-idm#readme",
