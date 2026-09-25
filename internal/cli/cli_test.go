@@ -1306,11 +1306,6 @@ func TestHandoffOChainLegacyFormat(t *testing.T) {
 }
 
 func TestHandoffImport(t *testing.T) {
-	restore := mockOCIContext(t, map[string]string{
-		"auth service import --file " + filepath.Join("ARTIFACTS", "oci-context-token-services.yml") + " --dry-run": "import ok\n",
-	})
-	defer restore()
-
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "plan.json")
 	outDir := filepath.Join(dir, "ARTIFACTS")
@@ -1330,18 +1325,22 @@ func TestHandoffImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedKey := "auth service import --file " + filepath.Join(outDir, "oci-context-token-services.yml") + " --dry-run"
-	restore()
-	restore = mockOCIContext(t, map[string]string{expectedKey: "import ok\n"})
+	expectedKey := "handoff accept --file " + filepath.Join(outDir, "oci-context-token-services.yml")
+	restore := mockOCIContext(t, map[string]string{expectedKey: "preview ok\n", expectedKey + " --apply": "applied ok\n"})
 	defer restore()
 
 	var handoffOut bytes.Buffer
-	code = Run([]string{"handoff", "-f", planPath, "--import", "--dry-run", "--out", outDir}, &handoffOut, &stderr)
+	code = Run([]string{"handoff", "-f", planPath, "--import", "--out", outDir}, &handoffOut, &stderr)
 	if code != 0 {
 		t.Fatalf("handoff import failed with %d: %s", code, stderr.String())
 	}
-	if handoffOut.String() != "import ok\n" {
+	if handoffOut.String() != "preview ok\n" {
 		t.Fatalf("unexpected import output: %q", handoffOut.String())
+	}
+	handoffOut.Reset()
+	code = Run([]string{"handoff", "-f", planPath, "--import", "--apply", "--out", outDir}, &handoffOut, &stderr)
+	if code != 0 || handoffOut.String() != "applied ok\n" {
+		t.Fatalf("handoff apply failed with %d: %s\n%s", code, stderr.String(), handoffOut.String())
 	}
 }
 
