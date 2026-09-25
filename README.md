@@ -72,7 +72,8 @@ available as a compatibility alias.
 Commands that read a plan accept `-f` or `--file`; `--plan` remains available
 as a compatibility alias.
 The preferred command shape is `oci-idm <verb> <resource> [flags]`, similar to
-`kubectl`: `get defaults`, `get domains`, `get services`, `get service-apps`, `clone app`, `plan apps`,
+`kubectl`: `get defaults`, `get domains`, `get services`, `get service-apps`,
+`create domain`, `edit app`, `create app-role-assignment`, `clone app`, `plan apps`,
 `doctor plan`, `materialize plan`, `apply plan`, `validate plan`, and `export`.
 
 Inspect the resolved defaults before planning:
@@ -90,9 +91,9 @@ oci-idm get domains -o text
 oci-idm describe domain --domain-id example-domain-ocid -o text
 ```
 
-For a dedicated domain, plan before creating it. The apply command reuses an
-exact display-name match; otherwise it creates the domain only with both
-`--execute` and `--confirm`, then waits until the lifecycle is `ACTIVE`:
+For a dedicated domain, plan before creating it. The create command reuses an
+exact display-name match; otherwise `--apply` creates the domain and waits
+until the lifecycle is `ACTIVE`:
 
 ```bash
 oci-idm plan domain \
@@ -101,7 +102,7 @@ oci-idm plan domain \
   --license-type <approved-license-type> \
   -o json > domain-plan.json
 
-oci-idm apply domain -f domain-plan.json --execute --confirm
+oci-idm create domain -f domain-plan.json --apply
 ```
 
 The plan defaults the compartment and home region from the selected
@@ -170,19 +171,19 @@ reject Authorization Code requests containing `offline_access`. Add only the
 missing redirect URI and grant types, alongside offline access when needed:
 
 ```bash
-oci-idm patch app \
+oci-idm edit app \
   --app-id example-resource-app-id \
   --allow-offline \
   --add-redirect-uri http://127.0.0.1:8180/callback \
   --add-grant authorization_code \
   --add-grant refresh_token \
-  --confirm
+  --apply
 ```
 
 The command reads issuer, OCI profile, config path, and region from the current
 `oci-context` by default. It reads the live app, adds no duplicate values, and
-verifies the result after a successful patch. `--execute` remains a no-op
-compatibility flag; `--confirm` is the only mutation gate.
+verifies the result after a successful patch. Omit `--apply` to inspect the
+exact patch first. `--confirm` and `--execute` remain compatibility flags.
 
 ## Web-app role assignments
 
@@ -191,11 +192,11 @@ maintaining a separate desired-state file. The command searches for the exact
 grant first, creates it only if missing, and verifies it afterward:
 
 ```bash
-oci-idm assign app-role \
+oci-idm create app-role-assignment \
   --app-id example-web-app-id \
   --role-id example-web-app-role-id \
   --group-id approved-web-app-group-id \
-  --confirm
+  --apply
 ```
 
 Use `--user-id` instead of `--group-id` for a direct user grant. For the
@@ -204,12 +205,12 @@ Identity Domains user ID first and keep the assignment target explicit in the
 result:
 
 ```bash
-oci-idm assign app-role \
+oci-idm create app-role-assignment \
   --app-id example-web-app-id \
   --role-id example-web-app-role-id \
   --me \
   --oci-context-service example-service \
-  --confirm
+  --apply
 ```
 
 `--me` is an alias for `--current-user`. It requires issuer-matched, unexpired subject metadata from
@@ -219,9 +220,9 @@ unambiguous and preserve review boundaries. This configures Identity Domain
 app access only; it does not change Control Plane OIDC provider configuration
 or Kubernetes resources.
 
-Omit `--confirm` to inspect the same exact grant first. The command returns
+Omit `--apply` to inspect the same exact grant first. The command returns
 `already-assigned` when present or a non-mutating `planned` result when the
-grant is missing; add `--confirm` only to create it.
+grant is missing; add `--apply` only to create it.
 
 Oracle service apps can protect seeded attributes even when the generic App
 schema describes them as writable. When `isOPCService` is true and
@@ -318,7 +319,7 @@ oci-context auth token --no-login --format raw
 
 `clone app` emits a standard `oci-context` handoff document by default. It does
 not print secrets. Use the existing `plan apps`, `materialize plan`, and
-`apply plan --confirm` path when you need reviewable payload files and
+`apply plan --apply` path when you need reviewable payload files and
 live Identity Domains creation. Authorization-code handoffs include
 `offlineAccess: true`, so `oci-context` requests `offline_access` and can cache
 the refresh token enabled by the generated app.
@@ -496,7 +497,7 @@ Use `materialize plan` for local review artifacts:
 oci-idm materialize plan -f idm-plan.json --out ./idm-artifacts
 ```
 
-For reviewed plans, `apply plan --confirm` runs the OCI Identity Domains changes
+For reviewed plans, `apply plan --apply` runs the OCI Identity Domains changes
 directly. The executor is intentionally conservative:
 
 - it searches for existing apps by name before creating them
@@ -509,7 +510,7 @@ directly. The executor is intentionally conservative:
 oci-idm apply plan \
   -f idm-plan.json \
   --out ./idm-apply \
-  --confirm \
+  --apply \
   -o text
 ```
 
