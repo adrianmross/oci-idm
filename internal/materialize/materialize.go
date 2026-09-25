@@ -26,6 +26,9 @@ func FromPlanFile(planPath string, outDir string) (Result, error) {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return Result{}, err
 	}
+	if err := plan.ValidateContract(); err != nil {
+		return Result{}, err
+	}
 	if strings.TrimSpace(outDir) == "" {
 		if strings.TrimSpace(planPath) == "-" {
 			outDir = "oci-idm-artifacts"

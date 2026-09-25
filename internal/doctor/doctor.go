@@ -39,6 +39,9 @@ func FromPlanFile(path string, defaults Defaults) (Report, error) {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return Report{}, err
 	}
+	if err := plan.ValidateContract(); err != nil {
+		return Report{}, err
+	}
 	return FromPlan(plan, defaults), nil
 }
 

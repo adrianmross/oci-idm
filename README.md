@@ -76,6 +76,33 @@ The preferred command shape is `oci-idm <verb> <resource> [flags]`, similar to
 `create domain`, `edit app`, `create app-role-assignment`, `clone app`, `plan apps`,
 `doctor plan`, `materialize plan`, `apply plan`, `validate plan`, and `export`.
 
+Machine-readable apps plans and exports include `apiVersion` and `kind` in
+addition to their legacy `schemaVersion`. Readers accept pre-versioned legacy
+documents, but reject an explicit incompatible API contract.
+
+Start from [examples/apps-plan-config.json](examples/apps-plan-config.json) for
+a small, checked-in JSON plan config. Explicit CLI flags win; config values
+override presets and context defaults:
+
+```json
+{
+  "apiVersion": "oci-idm.oracle.com/v1",
+  "kind": "IdentityDomainAppsPlanConfig",
+  "spec": {
+    "appPrefix": "payments",
+    "include": "user",
+    "rolePreset": "obp-rest-client"
+  }
+}
+```
+
+```bash
+oci-idm plan apps --preset ocix-local --plan-config apps-plan.json
+```
+
+The resulting plan records each resolved supplied value in `inputSources` as
+`flag`, `plan-config`, `preset:ocix-local`, or `ocix-context`.
+
 Inspect the resolved defaults before planning:
 
 ```bash
