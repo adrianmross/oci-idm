@@ -1216,6 +1216,36 @@ func TestHandoffReadsPlanFromStdin(t *testing.T) {
 	}
 }
 
+func TestExportOCIContextReadsPlanFromStdin(t *testing.T) {
+	var planOut bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"plan",
+		"--service", "obp",
+		"--issuer", "https://idcs-example.identity.oraclecloud.com",
+		"--platform", "https://example-oabcs.blockchain.ocp.oraclecloud.com:7443/restproxy",
+		"--include", "user",
+	}, &planOut, &stderr)
+	if code != 0 {
+		t.Fatalf("plan failed with %d: %s", code, stderr.String())
+	}
+
+	previous := stdinReader
+	stdinReader = bytes.NewReader(planOut.Bytes())
+	defer func() { stdinReader = previous }()
+
+	var output bytes.Buffer
+	code = Run([]string{"export", "--shape", "ocix"}, &output, &stderr)
+	if code != 0 {
+		t.Fatalf("export failed with %d: %s", code, stderr.String())
+	}
+	for _, want := range []string{`"schemaVersion": "oci-idm.handoff.oci-context.v1"`, `"tokenServices"`} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("expected %q in export output:\n%s", want, output.String())
+		}
+	}
+}
+
 func TestHandoffOChainEnv(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "plan.json")

@@ -954,20 +954,32 @@ func runPlan(args []string, stdout io.Writer) error {
 func runExport(args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("export", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	var planPath string
+	var output string
 	domain := flags.String("domain", "", "Identity Domains issuer URL")
 	app := flags.String("app", "", "Identity Domains OAuth client ID")
 	controlPlaneURL := flags.String("control-plane-url", "", "Control Plane base URL")
 	redirectURI := flags.String("redirect-uri", "", "Control Plane OAuth callback URL; defaults from --control-plane-url")
 	policyPath := flags.String("policy", "", "path to secret-free OBPEE Control Plane policy JSON")
-	shape := flags.String("shape", "", "render target: obpee-cp")
+	shape := flags.String("shape", "", "render target: obpee-cp or oci-context")
+	addFileFlags(flags, &planPath, "path to a JSON plan emitted by oci-idm plan, or - for stdin")
+	addOutputFlags(flags, &output, "json", "output format: json or yaml")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
-	if strings.ToLower(strings.TrimSpace(*shape)) != "obpee-cp" {
-		return fmt.Errorf("--shape obpee-cp is required")
+	switch strings.ToLower(strings.TrimSpace(*shape)) {
+	case "oci-context", "ocix":
+		plan, err := readPlanInput(planPath)
+		if err != nil {
+			return err
+		}
+		return printOCIContextExport(stdout, handoff.ForOCIContext(plan), output)
+	case "obpee-cp":
+	default:
+		return fmt.Errorf("--shape must be obpee-cp or oci-context")
 	}
 	if strings.TrimSpace(*domain) == "" || strings.TrimSpace(*app) == "" || strings.TrimSpace(*controlPlaneURL) == "" || strings.TrimSpace(*policyPath) == "" {
 		return fmt.Errorf("--domain, --app, --control-plane-url, and --policy are required")
@@ -997,6 +1009,23 @@ func runExport(args []string, stdout io.Writer) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(document)
+}
+
+func printOCIContextExport(stdout io.Writer, value handoff.OCIContext, output string) error {
+	switch strings.ToLower(strings.TrimSpace(output)) {
+	case "", "json":
+		data, err := handoff.JSON(value)
+		if err != nil {
+			return err
+		}
+		_, err = stdout.Write(data)
+		return err
+	case "yaml", "yml":
+		fmt.Fprint(stdout, handoff.TokenServicesYAML(value))
+		return nil
+	default:
+		return fmt.Errorf("unsupported oci-context export output %q", output)
+	}
 }
 
 func readOBPEEPolicy(path string) (obpeecp.Policy, error) {
@@ -2148,6 +2177,19 @@ func readPlanFile(path string) (planner.Plan, error) {
 	return plan, nil
 }
 
+func readPlanInput(path string) (planner.Plan, error) {
+	if strings.TrimSpace(path) == "" {
+		if file, ok := stdinReader.(*os.File); ok {
+			stat, err := file.Stat()
+			if err == nil && stat.Mode()&os.ModeCharDevice != 0 {
+				return planner.Plan{}, fmt.Errorf("-f/--file is required unless a plan is piped on stdin")
+			}
+		}
+		path = "-"
+	}
+	return readPlanFile(path)
+}
+
 func writeRootHelp(stdout io.Writer, program string) {
 	fmt.Fprintf(stdout, `%s plans OCI Identity Domains apps, grants, and token-helper handoffs.
 
@@ -2165,6 +2207,7 @@ Usage:
   %s create app-role-assignment --app-id app-id --role-id role-id --group-id group-id [--apply]
   %s plan apps [options]
   %s export --shape obpee-cp [options]
+  %s export --shape ocix [--plan plan.json] [-o json|yaml]
   %s plan apps [options] -o oci-context-yaml
   %s plan apps [options] -o ochain-env
   %s diagnose apps [options]
@@ -2196,6 +2239,8 @@ Plan options:
     token service name for issuer/scope defaults
   export --shape obpee-cp
     renders a secret-free Control Plane OIDC payload from --domain, --app, and --policy
+  export --shape ocix [--plan plan.json]
+    renders a secret-free token-service document for oci-context; omitting --plan reads a piped plan
   edit app
     preview --allow-offline, --add-redirect-uri, or --add-grant values; add --apply to write
   create app-role-assignment
@@ -2207,8 +2252,9 @@ Pipe contracts:
   clone app emits JSON that can pipe into oci-context service add --set-current
   plan apps -o oci-context-yaml can pipe into oci-context service add --set-current
   plan apps -o ochain-env emits OCHAIN_TOKEN_COMMAND
-  handoff remains available for saved plan files
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+  export --shape ocix emits JSON on stdout for oci-context service import stdin
+  handoff remains available for older scripts
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {

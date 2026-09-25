@@ -347,16 +347,20 @@ oci-context auth login
 oci-context auth token --no-login --format raw
 ```
 
-Import generated `oci-context` token services:
+Preview generated `oci-context` token services without writing a handoff file:
 
 ```bash
-oci-idm plan apps --service obp --resource-app-id example-resource-app-id \
-  -o oci-context-yaml |
-  oci-context service add --set-current
+set -o pipefail
+oci-idm plan apps --service obp --resource-app-id example-resource-app-id -o json |
+  oci-idm export --shape ocix |
+  oci-context service import --set-current
+# Review the preview, then repeat with --apply on `service import`.
 ```
 
-Merge the generated `token_services` entries into a global or project
-`oci-context` config, then validate with `oci-context auth token`.
+`export --shape ocix` emits a secret-free document on stdout. `service import`
+detects piped stdin, previews by default, and verifies the saved OAuth contract
+when run with `--apply`. For a saved input, use `--plan idm-plan.json`;
+`oci-context` remains an accepted shape name.
 
 Emit OChain environment data in standard shell, dotenv, or JSON shapes:
 
