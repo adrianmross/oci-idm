@@ -525,8 +525,8 @@ func runApplyDomain(args []string, stdout io.Writer) error {
 	flags.SetOutput(io.Discard)
 	var planPath string
 	addFileFlags(flags, &planPath, "path to a JSON plan emitted by oci-idm plan domain")
-	execute := flags.Bool("execute", false, "execute OCI domain creation")
-	confirm := flags.Bool("confirm", false, "required with --execute")
+	execute := flags.Bool("execute", false, "deprecated compatibility flag; --confirm executes OCI domain creation")
+	confirm := flags.Bool("confirm", false, "required before OCI changes")
 	var output string
 	addOutputFlags(flags, &output, "text", "output format: json or text")
 	if err := flags.Parse(args); err != nil {
@@ -538,15 +538,15 @@ func runApplyDomain(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(planPath) == "" {
 		return fmt.Errorf("-f/--file is required")
 	}
+	if *execute && !*confirm {
+		return fmt.Errorf("--execute requires --confirm")
+	}
 	plan, err := readDomainPlan(planPath)
 	if err != nil {
 		return err
 	}
-	if !*execute {
-		return writeDomainApplyResult(stdout, domainApplyResult{SchemaVersion: "oci-idm.domain-apply.v1", Status: "planned", Command: plan.Command}, output)
-	}
 	if !*confirm {
-		return fmt.Errorf("--execute requires --confirm")
+		return writeDomainApplyResult(stdout, domainApplyResult{SchemaVersion: "oci-idm.domain-apply.v1", Status: "planned", Command: plan.Command}, output)
 	}
 	if existingID, err := findExistingDomain(plan); err != nil {
 		return err
@@ -2113,7 +2113,7 @@ Usage:
   %s get domains [options]
   %s describe domain --domain-id domain-ocid
   %s plan domain --name example-domain --description '...' --license-type <type>
-  %s apply domain -f domain-plan.json --execute --confirm
+  %s apply domain -f domain-plan.json --confirm
   %s get services [options]
   %s get service-apps [options]
   %s describe service-app [options]

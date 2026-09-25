@@ -91,8 +91,8 @@ oci-idm describe domain --domain-id example-domain-ocid -o text
 ```
 
 For a dedicated domain, plan before creating it. The apply command reuses an
-exact display-name match; otherwise it creates the domain only with both
-`--execute` and `--confirm`, then waits until the lifecycle is `ACTIVE`:
+exact display-name match; otherwise `--confirm` creates the domain and waits
+until the lifecycle is `ACTIVE`:
 
 ```bash
 oci-idm plan domain \
@@ -101,7 +101,7 @@ oci-idm plan domain \
   --license-type <approved-license-type> \
   -o json > domain-plan.json
 
-oci-idm apply domain -f domain-plan.json --execute --confirm
+oci-idm apply domain -f domain-plan.json --confirm
 ```
 
 The plan defaults the compartment and home region from the selected
