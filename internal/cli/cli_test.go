@@ -1325,12 +1325,12 @@ func TestHandoffImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedKey := "handoff accept --file " + filepath.Join(outDir, "oci-context-token-services.yml")
+	expectedKey := "handoff accept --file " + filepath.Join(outDir, "oci-context-token-services.yml") + " --set-current"
 	restore := mockOCIContext(t, map[string]string{expectedKey: "preview ok\n", expectedKey + " --apply": "applied ok\n"})
 	defer restore()
 
 	var handoffOut bytes.Buffer
-	code = Run([]string{"handoff", "-f", planPath, "--import", "--out", outDir}, &handoffOut, &stderr)
+	code = Run([]string{"handoff", "-f", planPath, "--import", "--set-current", "--out", outDir}, &handoffOut, &stderr)
 	if code != 0 {
 		t.Fatalf("handoff import failed with %d: %s", code, stderr.String())
 	}
@@ -1338,7 +1338,7 @@ func TestHandoffImport(t *testing.T) {
 		t.Fatalf("unexpected import output: %q", handoffOut.String())
 	}
 	handoffOut.Reset()
-	code = Run([]string{"handoff", "-f", planPath, "--import", "--apply", "--out", outDir}, &handoffOut, &stderr)
+	code = Run([]string{"handoff", "-f", planPath, "--import", "--set-current", "--apply", "--out", outDir}, &handoffOut, &stderr)
 	if code != 0 || handoffOut.String() != "applied ok\n" {
 		t.Fatalf("handoff apply failed with %d: %s\n%s", code, stderr.String(), handoffOut.String())
 	}

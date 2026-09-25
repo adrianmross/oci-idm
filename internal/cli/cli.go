@@ -2028,6 +2028,7 @@ func runHandoff(args []string, stdout io.Writer) error {
 	importToOCIContext := flags.Bool("import", false, "preview generated token services with oci-context handoff accept")
 	importDryRun := flags.Bool("dry-run", false, "alias for the default preview when using --import")
 	importApply := flags.Bool("apply", false, "write and verify the reviewed oci-context handoff when using --import")
+	importSetCurrent := flags.Bool("set-current", false, "set the handoff's selected token service as current when using --import")
 	outDir := flags.String("out", "", "directory for generated handoff artifacts when using --import")
 	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for --import")
 	tokenService := flags.String("token-service", "", "token service name for OChain handoff output")
@@ -2061,6 +2062,9 @@ func runHandoff(args []string, stdout io.Writer) error {
 		}
 		file := filepath.Join(result.OutDir, "oci-context-token-services.yml")
 		args := []string{"handoff", "accept", "--file", file}
+		if *importSetCurrent {
+			args = append(args, "--set-current")
+		}
 		if *importApply {
 			args = append(args, "--apply")
 		}
@@ -2167,7 +2171,7 @@ Usage:
   %s doctor plan -f plan.json
   %s materialize plan -f plan.json --out ./idcs-artifacts
   %s handoff -f plan.json --target oci-context -o yaml
-  %s handoff -f plan.json --import --out ./idcs-artifacts [--apply]
+  %s handoff -f plan.json --import --out ./idcs-artifacts [--set-current] [--apply]
   %s apply plan -f plan.json --apply
   %s validate plan -f plan.json
   %s version

@@ -390,8 +390,8 @@ To hand the generated services to `oci-context`, preview first; add `--apply`
 only after reviewing the local change:
 
 ```bash
-oci-idm handoff -f idm-plan.json --import --out ./idcs-artifacts
-oci-idm handoff -f idm-plan.json --import --out ./idcs-artifacts --apply
+oci-idm handoff -f idm-plan.json --import --set-current --out ./idcs-artifacts
+oci-idm handoff -f idm-plan.json --import --set-current --out ./idcs-artifacts --apply
 ```
 
 For a planned OBP authorization-code app:
