@@ -378,7 +378,7 @@ func TestPlanAndApplyDomainCreatesAndWaitsForActive(t *testing.T) {
 	defer restore()
 
 	var applyOut bytes.Buffer
-	code = Run([]string{"apply", "domain", "-f", planPath, "--execute", "--confirm"}, &applyOut, &stderr)
+	code = Run([]string{"create", "domain", "-f", planPath, "--apply"}, &applyOut, &stderr)
 	if code != 0 {
 		t.Fatalf("apply domain failed with %d: %s", code, stderr.String())
 	}
@@ -420,7 +420,7 @@ func TestApplyDomainReusesMatchingDisplayName(t *testing.T) {
 	defer restore()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := Run([]string{"apply", "domain", "-f", planPath, "--execute", "--confirm"}, &stdout, &stderr)
+	code := Run([]string{"create", "domain", "-f", planPath, "--apply"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("apply domain failed with %d: %s", code, stderr.String())
 	}
@@ -464,12 +464,15 @@ func TestPatchAppOfflineAccessPlansAndExecutesGuardedSCIMPatch(t *testing.T) {
 	})
 	defer restore()
 	code := Run(args, &stdout, &stderr)
-	if code == 0 || !strings.Contains(stderr.String(), "--confirm is required") {
-		t.Fatalf("expected confirmation failure, code=%d stderr=%s", code, stderr.String())
+	if code != 0 {
+		t.Fatalf("patch preview failed with %d: %s", code, stderr.String())
+	}
+	if called {
+		t.Fatal("preview must not patch the app")
 	}
 	stdout.Reset()
 	stderr.Reset()
-	code = Run(append(args, "--confirm"), &stdout, &stderr)
+	code = Run(append(args, "--apply"), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("patch execute failed with %d: %s", code, stderr.String())
 	}
@@ -582,7 +585,7 @@ func TestPatchAppOfflineAccessReturnsNoopWhenAlreadyEnabled(t *testing.T) {
 	}
 }
 
-func TestPatchAppOfflineAccessRequiresConfirmation(t *testing.T) {
+func TestPatchAppOfflineAccessPlansByDefault(t *testing.T) {
 	restore := mockRunner(func(name string, commandArgs ...string) ([]byte, error) {
 		if name != "oci" || !strings.Contains(strings.Join(commandArgs, " "), "identity-domains app get") {
 			t.Fatalf("unexpected command: %s %v", name, commandArgs)
@@ -599,8 +602,11 @@ func TestPatchAppOfflineAccessRequiresConfirmation(t *testing.T) {
 		"--issuer", "https://idcs-example.identity.oraclecloud.com",
 		"--oci-context=false",
 	}, &stdout, &stderr)
-	if code == 0 || !strings.Contains(stderr.String(), "--confirm is required") {
-		t.Fatalf("expected confirmation failure, code=%d stderr=%s", code, stderr.String())
+	if code != 0 {
+		t.Fatalf("expected preview success, code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"status": "planned"`) {
+		t.Fatalf("expected planned output, got %s", stdout.String())
 	}
 }
 
@@ -635,8 +641,8 @@ func TestAssignAppRoleCreatesMissingGroupGrant(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
-		"assign", "app-role", "--app-id", "web-app-id", "--role-id", "role-id", "--group-id", "group-id",
-		"--issuer", "https://idcs-example.identity.oraclecloud.com", "--oci-context=false", "--confirm",
+		"create", "app-role-assignment", "--app-id", "web-app-id", "--role-id", "role-id", "--group-id", "group-id",
+		"--issuer", "https://idcs-example.identity.oraclecloud.com", "--oci-context=false", "--apply",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("assign failed with %d: %s", code, stderr.String())
@@ -984,7 +990,7 @@ func TestMaterializeAndValidate(t *testing.T) {
 		"-f", planPath,
 		"--out", applyDir,
 	}, &applyOut, &stderr)
-	if code == 0 || !strings.Contains(stderr.String(), "--confirm is required") {
+	if code == 0 || !strings.Contains(stderr.String(), "--apply is required") {
 		t.Fatalf("apply without confirmation did not fail closed: %s", stderr.String())
 	}
 	stderr.Reset()
@@ -994,7 +1000,7 @@ func TestMaterializeAndValidate(t *testing.T) {
 		"--out", applyDir,
 		"--execute",
 	}, &applyOut, &stderr)
-	if code == 0 || !strings.Contains(stderr.String(), "--confirm is required") {
+	if code == 0 || !strings.Contains(stderr.String(), "--apply is required") {
 		t.Fatalf("compatibility --execute did not retain the confirmation gate: %s", stderr.String())
 	}
 }
@@ -1031,7 +1037,7 @@ func TestApplyCreatesApp(t *testing.T) {
 	}
 
 	var applyOut bytes.Buffer
-	code = Run([]string{"apply", "plan", "-f", planPath, "--out", filepath.Join(dir, "apply"), "--confirm", "-o", "text"}, &applyOut, &stderr)
+	code = Run([]string{"apply", "plan", "-f", planPath, "--out", filepath.Join(dir, "apply"), "--apply", "-o", "text"}, &applyOut, &stderr)
 	if code != 0 {
 		t.Fatalf("apply failed with %d: %s", code, stderr.String())
 	}

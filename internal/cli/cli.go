@@ -62,6 +62,34 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 			return 1
 		}
 		return 0
+	case "create":
+		if len(args) > 1 && isResource(args[1], "domain", "domains") {
+			if err := runApplyDomain(args[2:], stdout); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
+		if len(args) > 1 && isResource(args[1], "app-role-assignment", "app-role-assignments") {
+			if err := runAssignAppRole(args[2:], stdout); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
+		fmt.Fprintln(stderr, "create requires a resource: domain or app-role-assignment")
+		return 1
+	case "edit":
+		commandArgs, err := stripResourceArg(args[1:], "app", "service-app", "resource-app", "identity-app")
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if err := runPatchApp(commandArgs, stdout); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	case "plan":
 		if len(args) > 1 && isResource(args[1], "domain", "domains") {
 			if err := runPlanDomain(args[2:], stdout); err != nil {
@@ -525,8 +553,9 @@ func runApplyDomain(args []string, stdout io.Writer) error {
 	flags.SetOutput(io.Discard)
 	var planPath string
 	addFileFlags(flags, &planPath, "path to a JSON plan emitted by oci-idm plan domain")
-	execute := flags.Bool("execute", false, "deprecated compatibility flag; --confirm executes OCI domain creation")
-	confirm := flags.Bool("confirm", false, "required before OCI changes")
+	execute := flags.Bool("execute", false, "deprecated compatibility flag; use --apply")
+	apply := flags.Bool("apply", false, "create the domain after preview")
+	confirm := flags.Bool("confirm", false, "deprecated alias for --apply")
 	var output string
 	addOutputFlags(flags, &output, "text", "output format: json or text")
 	if err := flags.Parse(args); err != nil {
@@ -538,14 +567,14 @@ func runApplyDomain(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(planPath) == "" {
 		return fmt.Errorf("-f/--file is required")
 	}
-	if *execute && !*confirm {
-		return fmt.Errorf("--execute requires --confirm")
+	if *execute && !*apply && !*confirm {
+		return fmt.Errorf("--execute requires --apply")
 	}
 	plan, err := readDomainPlan(planPath)
 	if err != nil {
 		return err
 	}
-	if !*confirm {
+	if !*apply && !*confirm {
 		return writeDomainApplyResult(stdout, domainApplyResult{SchemaVersion: "oci-idm.domain-apply.v1", Status: "planned", Command: plan.Command}, output)
 	}
 	if existingID, err := findExistingDomain(plan); err != nil {
@@ -1218,8 +1247,9 @@ func runApply(args []string, stdout io.Writer) error {
 	var planPath string
 	addFileFlags(flags, &planPath, "path to a JSON plan emitted by oci-idm plan, or - for stdin")
 	outDir := flags.String("out", "", "directory for generated apply artifacts")
-	flags.Bool("execute", false, "deprecated compatibility flag; apply always executes")
-	confirm := flags.Bool("confirm", false, "required before OCI changes")
+	flags.Bool("execute", false, "deprecated compatibility flag; use --apply")
+	apply := flags.Bool("apply", false, "apply OCI changes")
+	confirm := flags.Bool("confirm", false, "deprecated alias for --apply")
 	var output string
 	addOutputFlags(flags, &output, "text", "output format: text or json")
 	if err := flags.Parse(args); err != nil {
@@ -1231,8 +1261,8 @@ func runApply(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(planPath) == "" {
 		return fmt.Errorf("-f/--file is required")
 	}
-	if !*confirm {
-		return fmt.Errorf("--confirm is required to apply changes; use materialize plan for local review artifacts")
+	if !*apply && !*confirm {
+		return fmt.Errorf("--apply is required to apply changes; use materialize plan for local review artifacts")
 	}
 	plan, err := readPlanFile(planPath)
 	if err != nil {
@@ -1376,8 +1406,9 @@ func runPatchApp(args []string, stdout io.Writer) error {
 	useOCIContext := flags.Bool("oci-context", true, "read current oci-context defaults for omitted values")
 	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for defaults")
 	ociContextService := flags.String("oci-context-service", string(planner.ServiceOBP), "oci-context token service used for issuer defaults")
-	flags.Bool("execute", false, "deprecated compatibility flag; --confirm applies the patch")
-	confirm := flags.Bool("confirm", false, "required before OCI changes")
+	execute := flags.Bool("execute", false, "deprecated compatibility flag; use --apply")
+	apply := flags.Bool("apply", false, "apply the patch after preview")
+	confirm := flags.Bool("confirm", false, "deprecated alias for --apply")
 	preflight := flags.Bool("preflight", true, "read app state, calculate missing values, and verify the result")
 	var output string
 	addOutputFlags(flags, &output, "json", "output format: json or text")
@@ -1445,8 +1476,11 @@ func runPatchApp(args []string, stdout io.Writer) error {
 			}
 		}
 	}
-	if !*confirm {
-		return fmt.Errorf("--confirm is required to patch app changes")
+	if *execute && !*apply && !*confirm {
+		return fmt.Errorf("--execute requires --apply")
+	}
+	if !*apply && !*confirm {
+		return writeAppPatchPlan(stdout, output, plan)
 	}
 	operations, err := json.Marshal(plan.Operations)
 	if err != nil {
@@ -1597,7 +1631,8 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 	useOCIContext := flags.Bool("oci-context", true, "read current oci-context defaults for omitted values")
 	ociContextBin := flags.String("oci-context-bin", "oci-context", "oci-context binary used for defaults")
 	ociContextService := flags.String("oci-context-service", string(planner.ServiceOBP), "oci-context token service used for issuer defaults")
-	confirm := flags.Bool("confirm", false, "required before creating an app-role assignment")
+	apply := flags.Bool("apply", false, "create the app-role assignment after preview")
+	confirm := flags.Bool("confirm", false, "deprecated alias for --apply")
 	var output string
 	addOutputFlags(flags, &output, "json", "output format: json or text")
 	if err := flags.Parse(args); err != nil {
@@ -1663,7 +1698,7 @@ func runAssignAppRole(args []string, stdout io.Writer) error {
 		assignment.Status = "already-assigned"
 		return writeAppRoleAssignment(stdout, output, assignment)
 	}
-	if !*confirm {
+	if !*apply && !*confirm {
 		return writeAppRoleAssignment(stdout, output, assignment)
 	}
 	payload := planner.GrantInput{
@@ -2113,13 +2148,13 @@ Usage:
   %s get domains [options]
   %s describe domain --domain-id domain-ocid
   %s plan domain --name example-domain --description '...' --license-type <type>
-  %s apply domain -f domain-plan.json --confirm
+  %s create domain -f domain-plan.json [--apply]
   %s get services [options]
   %s get service-apps [options]
   %s describe service-app [options]
   %s clone app --flow authorization-code --name hebe-obp-user
-  %s patch app --app-id resource-app-id --allow-offline
-  %s assign app-role --app-id app-id --role-id role-id --group-id group-id --confirm
+  %s edit app --app-id resource-app-id --allow-offline [--apply]
+  %s create app-role-assignment --app-id app-id --role-id role-id --group-id group-id [--apply]
   %s plan apps [options]
   %s export --shape obpee-cp [options]
   %s plan apps [options] -o oci-context-yaml
@@ -2129,7 +2164,7 @@ Usage:
   %s materialize plan -f plan.json --out ./idcs-artifacts
   %s handoff -f plan.json --target oci-context -o yaml
   %s handoff -f plan.json --import --out ./idcs-artifacts
-  %s apply plan -f plan.json --confirm
+  %s apply plan -f plan.json --apply
   %s validate plan -f plan.json
   %s version
 
@@ -2153,10 +2188,10 @@ Plan options:
     token service name for issuer/scope defaults
   export --shape obpee-cp
     renders a secret-free Control Plane OIDC payload from --domain, --app, and --policy
-  patch app
-    add --allow-offline, --add-redirect-uri, or --add-grant values with --confirm
-  assign app-role
-    add one User or Group to one app role with --confirm; existing grants are retained
+  edit app
+    preview --allow-offline, --add-redirect-uri, or --add-grant values; add --apply to write
+  create app-role-assignment
+    preview one User or Group app-role grant; add --apply to write; existing grants are retained
   -o, --output json|text|oci-context-yaml|oci-context-json|commands|ochain-env|ochain-dotenv|ochain-json
 
 Pipe contracts:
