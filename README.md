@@ -568,3 +568,32 @@ oci-identity-apps plan apps --issuer ... --scope ...
 ```
 
 New documentation and package names use `oci-idm`.
+
+## Directory group rules
+
+Describe the target domain, the access-token scope, and each directory group with its explicitly requested direct memberships in a JSON template. An empty user list creates or reuses the group without adding members.
+
+```json
+{
+  "target": {
+    "issuer": "https://example.identity.oraclecloud.com",
+    "resourceScope": "https://service.example.test/read",
+    "ociProfile": "EXAMPLE"
+  },
+  "groups": [
+    {"name": "Example readers", "users": ["reader@example.test"]}
+  ]
+}
+```
+
+```sh
+oci-idm plan group-rules -f template.json > plan.json
+oci-idm apply group-rules -f plan.json
+oci-idm apply group-rules -f plan.json --execute --confirm --out ./requests
+```
+
+Planning and the default apply preview make no IAM requests. Optionally pass `--oci-context-service <name>` during planning to fill missing issuer, scope, profile and region fields from the selected token service. Review the exact domain, scope, profile and users in the generated plan before execution. The scoped `group_roles` claim returns the user's group display names for access tokens requesting that scope. Multiple applications can request a scope. Plan group membership separately from application authorization.
+
+Execution resolves each username exactly once before writing, rejects a conflicting claim, creates missing groups and adds the specified users through the group's SCIM `members` attribute. Unlisted memberships are preserved. The JSON result lists completed steps, including partial progress if a later operation fails. After correcting an error, rerun the reviewed plan to reconcile remaining work. Request payloads contain directory identifiers and should remain private.
+
+See [OCI scoped custom claims](https://docs.oracle.com/en-us/iaas/Content/Identity/api-getstarted/custom-claims-token.htm) and [OCI Identity Domains group membership](https://docs.oracle.com/en/learn/ociiam-id-restapi/index.html).

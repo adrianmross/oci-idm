@@ -91,6 +91,13 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 		}
 		return 0
 	case "plan":
+		if len(args) > 1 && isResource(args[1], "group-rules") {
+			if err := runGroupRules(args[0], args[2:], stdout); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
 		if len(args) > 1 && isResource(args[1], "domain", "domains") {
 			if err := runPlanDomain(args[2:], stdout); err != nil {
 				fmt.Fprintln(stderr, err)
@@ -182,6 +189,13 @@ func RunWithName(program string, args []string, stdout io.Writer, stderr io.Writ
 		}
 		return 0
 	case "apply":
+		if len(args) > 1 && isResource(args[1], "group-rules") {
+			if err := runGroupRules(args[0], args[2:], stdout); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
 		if len(args) > 1 && isResource(args[1], "domain", "domains") {
 			if err := runApplyDomain(args[2:], stdout); err != nil {
 				fmt.Fprintln(stderr, err)
@@ -2298,6 +2312,7 @@ Pipe contracts:
   export --shape ocix emits JSON on stdout for oci-context service import stdin
   handoff remains available for older scripts
 `, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+	fmt.Fprintf(stdout, "\nGroup rules:\n  %s plan group-rules -f template.json\n  %s apply group-rules -f plan.json [--execute --confirm]\n", program, program)
 }
 
 func writeTextPlan(stdout io.Writer, plan planner.Plan) {
